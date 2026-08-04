@@ -1,7 +1,9 @@
 """silpo-agent CLI entrypoint. `reorder` wires the pipeline together per the
 PRD's module order: Address Resolver -> Order Aggregator -> Substitution
-Resolver -> Cart Writer -> report. Promo optimization and budget cap are a
-separate ticket (#6) — not built here.
+Resolver -> Cart Writer -> report. Cart Writer owns the non-empty cart guard
+(warn-and-proceed-or-abort) and the optional `--budget` trim; the CLI only
+parses `--budget` and reports the outcome. Promo optimization is a separate,
+not-yet-built ticket.
 """
 
 import argparse
@@ -15,7 +17,7 @@ from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_t
 from silpo_agent.substitution_resolver import resolve_substitutions
 
 
-def _run_reorder(last: int, threshold: float, client, log_store) -> int:
+def _run_reorder(last: int, threshold: float, client, log_store, budget: float | None = None) -> int:
     address = resolve_address(client, log_store)
     if address is None:
         print("reorder: no delivery address resolved; aborting before product search", file=sys.stderr)
@@ -29,7 +31,7 @@ def _run_reorder(last: int, threshold: float, client, log_store) -> int:
         return 1
 
     substitution_result = resolve_substitutions(client, log_store, typical_items)
-    report = write_cart(client, substitution_result.items)
+    report = write_cart(client, substitution_result.items, budget=budget)
 
     if address:
         print(f"Delivering to: {address.label}")
@@ -37,6 +39,14 @@ def _run_reorder(last: int, threshold: float, client, log_store) -> int:
         print(f"Substituted {original_id} -> {replacement_id}")
     if substitution_result.unavailable:
         print(f"Unavailable ({len(substitution_result.unavailable)}): {', '.join(substitution_result.unavailable)}")
+
+    if report.aborted:
+        return 1
+
+    if report.trimmed:
+        print(f"Trimmed {len(report.trimmed)} item(s) to fit budget {budget:.2f}:")
+        for product_id, price in report.trimmed:
+            print(f"  - {product_id}: {price:.2f}")
     print(f"Added {len(report.items_added)} item(s):")
     for product_id, price in report.items_added:
         print(f"  - {product_id}: {price:.2f}")
@@ -52,6 +62,9 @@ def main(argv: list[str] | None = None, *, client=None, log_store=None) -> int:
     reorder_parser.add_argument(
         "--threshold", type=float, required=True, help="Minimum order-frequency share (0-1) to count as typical"
     )
+    reorder_parser.add_argument(
+        "--budget", type=float, default=None, help="Optional spend cap; trims lowest-priority items to fit"
+    )
 
     args = parser.parse_args(argv)
 
@@ -60,7 +73,9 @@ def main(argv: list[str] | None = None, *, client=None, log_store=None) -> int:
         return 0
 
     if args.command == "reorder":
-        return _run_reorder(args.last, args.threshold, client or MCPClient(), log_store or ReorderLogStore())
+        return _run_reorder(
+            args.last, args.threshold, client or MCPClient(), log_store or ReorderLogStore(), budget=args.budget
+        )
 
     return 0
 
