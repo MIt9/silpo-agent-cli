@@ -19,8 +19,8 @@ def test_no_args_prints_help_and_exits_zero(capsys):
 
 def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
     orders = [
-        {"items": [{"product_id": "milk", "price": 45.0}]},
-        {"items": [{"product_id": "milk", "price": 44.0}]},
+        {"products": [{"id": "milk", "price": 45.0, "removed": False}]},
+        {"products": [{"id": "milk", "price": 44.0, "removed": False}]},
     ]
     client = FakeClient(
         {
@@ -99,7 +99,7 @@ def test_reorder_resolves_cart_context_between_address_resolver_and_order_aggreg
 
 
 def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart_writer(monkeypatch, tmp_path):
-    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
@@ -126,7 +126,14 @@ def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart
 
 
 def test_reorder_reports_unavailable_items(capsys, monkeypatch, tmp_path):
-    orders = [{"items": [{"product_id": "milk", "price": 45.0}, {"product_id": "eggs", "price": 60.0}]}]
+    orders = [
+        {
+            "products": [
+                {"id": "milk", "price": 45.0, "removed": False},
+                {"id": "eggs", "price": 60.0, "removed": False},
+            ]
+        }
+    ]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
@@ -153,7 +160,7 @@ def test_reorder_reports_substitution_when_auto_applied(capsys, monkeypatch, tmp
     """A 1-candidate auto-substitution must actually show up in the printed
     report, not just get silently added to the cart under its replacement id.
     """
-    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
@@ -200,7 +207,7 @@ def test_reorder_with_insufficient_orders_errors_without_touching_cart(capsys, m
 
 
 def test_reorder_non_empty_cart_warns_and_aborts_on_decline(capsys, monkeypatch, tmp_path):
-    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
@@ -228,7 +235,7 @@ def test_reorder_non_empty_cart_warns_and_aborts_on_decline(capsys, monkeypatch,
 
 
 def test_reorder_non_empty_cart_warns_and_proceeds_on_confirm(capsys, monkeypatch, tmp_path):
-    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
@@ -256,14 +263,19 @@ def test_reorder_non_empty_cart_warns_and_proceeds_on_confirm(capsys, monkeypatc
 def test_reorder_budget_trims_lowest_priority_items_and_reports_them(capsys, monkeypatch, tmp_path):
     orders = [
         {
-            "items": [
-                {"product_id": "milk", "price": 45.0},
-                {"product_id": "bread", "price": 30.0},
-                {"product_id": "chips", "price": 25.0},
+            "products": [
+                {"id": "milk", "price": 45.0, "removed": False},
+                {"id": "bread", "price": 30.0, "removed": False},
+                {"id": "chips", "price": 25.0, "removed": False},
             ]
         },
-        {"items": [{"product_id": "milk", "price": 45.0}, {"product_id": "bread", "price": 30.0}]},
-        {"items": [{"product_id": "milk", "price": 45.0}]},
+        {
+            "products": [
+                {"id": "milk", "price": 45.0, "removed": False},
+                {"id": "bread", "price": 30.0, "removed": False},
+            ]
+        },
+        {"products": [{"id": "milk", "price": 45.0, "removed": False}]},
     ]
     client = FakeClient(
         {
@@ -298,7 +310,14 @@ def test_reorder_budget_trims_lowest_priority_items_and_reports_them(capsys, mon
 
 
 def test_reorder_without_budget_never_trims_and_reports_actual_total(capsys, monkeypatch, tmp_path):
-    orders = [{"items": [{"product_id": "milk", "price": 45.0}, {"product_id": "bread", "price": 30.0}]}]
+    orders = [
+        {
+            "products": [
+                {"id": "milk", "price": 45.0, "removed": False},
+                {"id": "bread", "price": 30.0, "removed": False},
+            ]
+        }
+    ]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
@@ -346,7 +365,7 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
     "Promo optimization" entry / issue #7 acceptance criteria) -- no
     promo-equivalent lookup, no bonus lookup, no cart-wide update call.
     """
-    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
@@ -373,7 +392,7 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
 
 
 def test_reorder_optimize_promos_swaps_item_and_applies_bonuses(capsys, monkeypatch, tmp_path):
-    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
