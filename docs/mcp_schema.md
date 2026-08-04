@@ -207,7 +207,9 @@ just Address Resolver. Summarized first, details below:
   genuinely out-of-stock cart items and got `"Found replacements for 0
   products"` (empty `items`) — so the populated-item shape is still
   unconfirmed; worth retesting against a product with known replacements
-  before relying on field names inside `items[]`.
+  before relying on field names inside `items[]`. See "Assumptions made in
+  issue #18" below for the shape `substitution_resolver.py` currently
+  assumes for a populated entry.
 - **Product record shape** (same shape returned by `silpo_get_products`,
   `silpo_find_products_batch`, and `silpo_get_similar_products` — this is
   the shape Substitution Resolver and Promo Optimizer should both consume):
@@ -490,6 +492,12 @@ of the ones above:
 
 ## Assumptions made in issue #5 (out-of-stock substitution flow with memory)
 
+**Superseded by issue #18** — the `silpo_check_availability` tool and the
+per-item `silpo_get_replacements` shape described below were both invented
+and did not survive contact with the live-verified schema; see "Assumptions
+made in issue #18" further down for what `substitution_resolver.py` actually
+does now. Left here for history.
+
 Still no live-verified schema at implementation time. `silpo_agent/substitution_resolver.py`
 adds availability-checking and replacement resolution on top of the ones
 above:
@@ -611,3 +619,68 @@ in a plain `reorder` run:
   option (not a bare boolean flag), per the PRD's Promo Optimizer section
   and issue title exactly as written — `--optimize` with no value or an
   unrecognized value is rejected by argparse rather than silently ignored.
+
+## Assumptions made in issue #18 (fix Substitution Resolver against live-verified MCP schema)
+
+Issue #18 replaced the invented `silpo_check_availability` tool and the
+per-item `silpo_get_replacements` call in `silpo_agent/substitution_resolver.py`
+with the two real, live-verified tools documented above
+("Product search / replacement tools"). Two things in the new
+implementation are still assumptions, not confirmed live:
+
+- **Availability-check query term**: `silpo_find_products_batch`'s
+  `products` field is a list of free-text search queries. Issue #19 (merged
+  into `main` mid-#18) added a `name` field to `TypicalItem`, so
+  `_check_availability`/`_search_query` in `substitution_resolver.py` now
+  search on `item.name` when present — a real product name is a materially
+  better free-text query than a raw id/UUID — falling back to
+  `item.product_id` only for items that don't carry a name (substitution and
+  promo results, which don't currently carry one through; see `_to_item` /
+  `promo_optimizer.py`). Still unconfirmed against a live call whether the
+  real search endpoint matches a `name`-as-written query back to the exact
+  same product (vs. a near-duplicate/variant) — `queries[].query` is matched
+  back to the original item(s) that used that exact query string, and the
+  *top* result for that query is trusted as the match. If that assumption
+  turns out wrong, `silpo_get_product_details({"branchId", "slug", ...})`
+  would be a more precise fallback, but that needs a `slug`, which no
+  `TypicalItem` currently carries.
+- **Populated `silpo_get_replacements` item shape (still genuinely
+  unconfirmed)**: as noted above, a live call against real out-of-stock
+  items returned an empty `items` array, so the shape of a populated entry
+  has never been observed. `_fetch_replacements` assumes each entry looks
+  like `{"productId": "<original id>", "replacements": [<product record>,
+  ...]}`, where each replacement candidate uses the general product-record
+  shape (`"id"`, `"price"`, `"stock"`, `"available"`, ...) documented above
+  — a guess grounded in the shape used consistently elsewhere in this MCP
+  server, not a verified response. `_fetch_replacements` still normalizes a
+  single dict to a one-item list for `"replacements"`, keeping the
+  defensive pattern used throughout this codebase. Revisit this first once
+  a live call against a product with real replacement candidates is
+  possible.
+- **Context source for both calls**: both `_check_availability` and
+  `_fetch_replacements` take `branchId`/`companyId`/`deliveryType`/timeslot
+  from the `CartContext` resolved by #17 (the *current* session's cart
+  context), not from `TypicalItem.company_id`/`.branch_id` (the *historical*
+  order's context, added in #16). Chosen because availability/replacements
+  must reflect where the user is ordering from right now, not where a past
+  order happened to ship from; `TypicalItem.company_id`/`.branch_id` are
+  left unused by this resolver as a result.
+- **Batching**: both tool calls batch across all items in a single
+  `resolve_substitutions` run (one `silpo_find_products_batch` call for all
+  typical items, one `silpo_get_replacements` call for all items found
+  unavailable) rather than one call per item, per the ticket's real batch
+  shape. The per-item substitution *decision* logic (0/1/>1 candidates,
+  Substitution Memory reuse) is unchanged from issue #5.
+- **No-cart-context guard**: `resolve_cart_context` returns an all-`None`
+  `CartContext` when the user has no shopping cart yet (a real, normal state
+  — first-ever run, or a cleared cart), not an error. `resolve_substitutions`
+  guards on `cart_context.branch_id`/`.company_id` being `None` and skips
+  both MCP calls entirely in that case (reporting every item unavailable)
+  rather than sending `None` fields to the real API. Found in code review of
+  the initial #18 PR, before it reached `main`.
+- **Candidate id key fallback**: since the populated `silpo_get_replacements`
+  item shape is unconfirmed (see above), candidate id lookups try `"id"`
+  first (the general product-record shape) and fall back to `"productId"`
+  (the key used by confirmed cart/order product shapes elsewhere in this
+  codebase) rather than hard-failing with a `KeyError` if the real shape
+  turns out to differ.

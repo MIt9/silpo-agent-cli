@@ -3,10 +3,11 @@ PRD's module order: Address Resolver -> Cart Context Resolver -> Order
 Aggregator -> Substitution Resolver -> (optional) Promo Optimizer -> Cart
 Writer -> report. Cart Context Resolver resolves branchId/companyId/
 deliveryType/timeslot/products (see cart_context.py); its `CartContext` is
-threaded through to Cart Writer (issue #19) as the source of truth for the
-non-empty-cart guard and the branch/company fallback on each add-to-cart
-item -- no other module consumes it yet, that wiring lands in follow-up
-tickets (#18, #20). Cart Writer owns the non-empty cart guard
+threaded through to both Substitution Resolver (issue #18, for its
+availability/replacement lookups) and Cart Writer (issue #19, as the source
+of truth for the non-empty-cart guard and the branch/company fallback on
+each add-to-cart item). Promo Optimizer doesn't consume it yet; that wiring
+lands in a follow-up ticket (#20). Cart Writer owns the non-empty cart guard
 (warn-and-proceed-or-abort) and the optional `--budget` trim; the CLI only
 parses `--budget` and reports the outcome. Promo Optimizer runs only when
 `--optimize promos` is passed -- the module isn't even called otherwise, so
@@ -44,7 +45,7 @@ def _run_reorder(
         print(f"reorder: {exc}", file=sys.stderr)
         return 1
 
-    substitution_result = resolve_substitutions(client, log_store, typical_items)
+    substitution_result = resolve_substitutions(client, log_store, typical_items, cart_context)
 
     items = substitution_result.items
     promo_result = None
