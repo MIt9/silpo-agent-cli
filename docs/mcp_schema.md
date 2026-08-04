@@ -106,3 +106,40 @@ narrower assumptions on top of the ones above:
   known price, rather than trusting a total in
   `silpo_add_or_update_cart_products`'s response — that response shape is
   also unconfirmed.
+
+## Assumptions made in issue #4 (delivery address confirmation flow)
+
+Still no live-verified schema at implementation time. `silpo_agent/address_resolver.py`
+replaces issue #3's silent `_resolve_default_address` with an interactive
+confirm/pick/new-address flow, and makes these additional assumptions on top
+of the ones above:
+
+- **`silpo_get_my_delivery_addresses` shape** (supersedes issue #3's note):
+  same assumption — a list of dicts, each optionally with `"is_default"`
+  (bool), `"address"` and/or `"id"`. The Address Resolver now uses the full
+  list (not just the default), so an address missing both `"address"` and
+  `"id"` would display as `None` in a prompt — not defended against, since
+  the real shape is unconfirmed.
+- **`silpo_find_address` request/response shape**: assumed to accept
+  `{"query": "<free-text the user typed>"}` and return either a list of
+  address dicts (same shape as `silpo_get_my_delivery_addresses` entries —
+  `"id"` / `"address"`) or a single dict for one match. The Address Resolver
+  normalizes a single-dict response into a one-item list and uses the first
+  result. Zero results is treated as "not found" and the run resolves no
+  address for that attempt. Revisit once the real response shape (ranking,
+  multiple candidates, confidence) is confirmed.
+- **`silpo_get_available_delivery_types` request shape**: assumed to accept
+  `{"address_id": "<id from the found address>"}`. Called immediately after
+  a successful `silpo_find_address` match, per the PRD's
+  `silpo_find_address` -> `silpo_get_available_delivery_types` chain, but its
+  response is not inspected or acted on yet (no delivery-type selection UX
+  exists) — this ticket only establishes the address/branch context, not
+  delivery-slot selection. Revisit once a delivery-type step is built.
+- **Reorder Log audit record shape**: `ReorderLogStore.append_run` already
+  accepts an arbitrary dict (no schema enforcement), so the Address Resolver
+  writes a minimal record — `{"timestamp", "address", "address_id"}` — per
+  run once an address is confirmed, rather than adding a new store method.
+  This is narrower than the full run record shape used in
+  `test_log_store.py`'s fixtures (`items_added`, `substitutions`, `total`);
+  a later ticket that logs the full reorder run may want to merge these into
+  one `append_run` call per run instead of two.
