@@ -22,6 +22,7 @@ from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient
 from silpo_agent.cart_context import resolve_cart_context
 from silpo_agent.cart_writer import write_cart
+from silpo_agent.coupons_lister import list_coupons
 from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
 from silpo_agent.promo_optimizer import optimize_promos
@@ -91,6 +92,16 @@ def _run_clear_context(log_store, input_fn, print_fn) -> int:
     return 0
 
 
+def _run_coupons(client) -> int:
+    lines = list_coupons(client)
+    if not lines:
+        print("No active coupons found.")
+        return 0
+    for line in lines:
+        print(line.format())
+    return 0
+
+
 _TOP_LEVEL_EPILOG = """\
 First run triggers a one-time browser login (OAuth2.1+PKCE against
 mcp.silpo.ua); the token is cached in your OS keyring afterward, so
@@ -99,6 +110,7 @@ later runs don't re-prompt until it expires.
 commands:
   reorder         rebuild your cart from your typical (frequently-bought) items
   clear-context   wipe your local reorder history and substitution memory
+  coupons         list your active loyalty coupons (read-only)
 
 run 'silpo-agent reorder --help' for reorder's flags and examples.
 """
@@ -204,6 +216,14 @@ def main(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    subparsers.add_parser(
+        "coupons",
+        help="List your active loyalty coupons (read-only)",
+        description="List your active loyalty coupons with their buying condition, validity dates, and reward. "
+        "Read-only -- makes no changes to your cart or account, and never cross-references coupons against "
+        "your cart or search results.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -222,6 +242,9 @@ def main(
 
     if args.command == "clear-context":
         return _run_clear_context(log_store or ReorderLogStore(), input_fn, print_fn)
+
+    if args.command == "coupons":
+        return _run_coupons(client or MCPClient())
 
     return 0
 
