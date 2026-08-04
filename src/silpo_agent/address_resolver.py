@@ -110,10 +110,14 @@ def resolve_address(client, log_store, *, input_fn=None, print_fn=None) -> Resol
         resolved = _enter_new_address(client, query, print_fn)
 
     if resolved is not None:
-        client.call(
-            "silpo_get_available_delivery_types",
-            {"latitude": resolved.latitude, "longitude": resolved.longitude},
-        )
+        # A resolved address without coordinates can't establish delivery-type
+        # context (a malformed saved-address entry, e.g.) -- skip rather than
+        # send nulls to the real API.
+        if resolved.latitude is not None and resolved.longitude is not None:
+            client.call(
+                "silpo_get_available_delivery_types",
+                {"latitude": resolved.latitude, "longitude": resolved.longitude},
+            )
         log_store.append_run(
             {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),

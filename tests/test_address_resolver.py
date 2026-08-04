@@ -127,6 +127,23 @@ def test_accepting_saved_address_looks_up_delivery_types_by_coordinates():
     assert ("silpo_get_available_delivery_types", {"latitude": 49.233, "longitude": 28.468}) in client.calls
 
 
+def test_resolved_address_missing_coordinates_skips_delivery_types_lookup():
+    """A malformed saved-address entry with no lat/lon must not send nulls
+    to the real silpo_get_available_delivery_types API."""
+    client = FakeClient(
+        {
+            "silpo_get_my_delivery_addresses": addresses_response(
+                saved_address("a1", "Вінниця", "Варшавська вулиця", "27", latitude=None, longitude=None),
+            )
+        }
+    )
+    log_store = FakeLogStore()
+
+    resolve_address(client, log_store, input_fn=make_input("y"), print_fn=lambda *a: None)
+
+    assert all(call[0] != "silpo_get_available_delivery_types" for call in client.calls)
+
+
 def test_first_declined_then_pick_from_remaining_list():
     client = FakeClient(
         {

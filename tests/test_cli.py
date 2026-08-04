@@ -26,7 +26,7 @@ def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": True},
         }
@@ -50,6 +50,9 @@ def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
     assert tool_order.index("silpo_get_my_delivery_addresses") < tool_order.index("silpo_get_my_online_orders")
     # Confirmed address is written to the Reorder Log for audit.
     assert log_store.read_history()[0]["address"] == "Kyiv, Some St 1"
+    # Delivery-type/branch context is looked up from the resolved address's
+    # actual coordinates, not a nonexistent address_id.
+    assert ("silpo_get_available_delivery_types", {"latitude": 50.45, "longitude": 30.52}) in client.calls
 
 
 def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart_writer(monkeypatch, tmp_path):
@@ -58,7 +61,7 @@ def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": False},
             "silpo_get_replacements": [{"product_id": "milk-oat", "price": 50.0}],
@@ -85,7 +88,7 @@ def test_reorder_reports_unavailable_items(capsys, monkeypatch, tmp_path):
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": False},
             "silpo_get_replacements": [],
@@ -112,7 +115,7 @@ def test_reorder_reports_substitution_when_auto_applied(capsys, monkeypatch, tmp
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": False},
             "silpo_get_replacements": [{"product_id": "milk-oat", "price": 50.0}],
@@ -138,7 +141,7 @@ def test_reorder_with_insufficient_orders_errors_without_touching_cart(capsys, m
         {
             "silpo_get_my_online_orders": [],
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
         }
     )
@@ -159,7 +162,7 @@ def test_reorder_non_empty_cart_warns_and_aborts_on_decline(capsys, monkeypatch,
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": True},
             "silpo_get_my_shopping_cart": {"items": [{"product_id": "leftover"}]},
@@ -187,7 +190,7 @@ def test_reorder_non_empty_cart_warns_and_proceeds_on_confirm(capsys, monkeypatc
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": True},
             "silpo_get_my_shopping_cart": {"items": [{"product_id": "leftover"}]},
@@ -223,7 +226,7 @@ def test_reorder_budget_trims_lowest_priority_items_and_reports_them(capsys, mon
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": True},
         }
@@ -257,7 +260,7 @@ def test_reorder_without_budget_never_trims_and_reports_actual_total(capsys, mon
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": True},
         }
@@ -305,7 +308,7 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": True},
         }
@@ -332,7 +335,7 @@ def test_reorder_optimize_promos_swaps_item_and_applies_bonuses(capsys, monkeypa
         {
             "silpo_get_my_online_orders": orders,
             "silpo_get_my_delivery_addresses": [
-                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_check_availability": {"available": True},
             "silpo_get_promo_equivalent": {"product_id": "milk-promo", "price": 40.0},
