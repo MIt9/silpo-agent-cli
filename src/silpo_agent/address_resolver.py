@@ -3,18 +3,29 @@ search runs against, before any product search happens (see
 prd_reorder_optimizer.md's Address Resolver section and CONTEXT.md's
 "Delivery address resolution" entry).
 
-Source is `silpo_get_my_delivery_addresses` (never order data). The
-MCP-marked default/first address is always proposed for confirmation first,
-every run, regardless of what a prior run's Reorder Log recorded. On
-decline: pick from the remaining saved addresses, or type a brand-new
-address (geocoded via `silpo_find_address` -> `silpo_get_available_delivery_types`).
-The confirmed choice is written to the Reorder Log for audit only -- it
-never feeds back into what's proposed next run.
+Source is `silpo_get_my_delivery_addresses` (never order data). The first
+address in the API's return order is always proposed for confirmation first,
+every run, regardless of what a prior run's Reorder Log recorded -- MCP does
+not mark any address as a server-side default (live-verified, see
+../../docs/mcp_schema.md's "Live-verified: address tools" section), so
+"propose first" just means "first as the API returns them," documented here
+as an assumption rather than a real default. On decline: pick from the
+remaining saved addresses, or type a brand-new address (geocoded via
+`silpo_find_address` -> `silpo_get_available_delivery_types`, looked up by
+lat/lon). The confirmed choice is written to the Reorder Log for audit only
+-- it never feeds back into what's proposed next run.
 
-Schema assumptions (unverified live, see ../../docs/mcp_schema.md):
-each address entry is a dict optionally with "is_default" (bool) and
-"address" and/or "id". `silpo_find_address` is assumed to return a list of
-matches shaped like the same address dicts (or a single dict for one match).
+Real schemas (live-verified, see ../../docs/mcp_schema.md):
+- `silpo_get_my_delivery_addresses` takes no args and returns
+  `{"success", "summary", "addresses": [...]}`; each entry has
+  `id`/`tag`/`city`/`street`/`building`/`apartment`/`floor`/`entrance`/
+  `latitude`/`longitude`/`comment`, no `"address"`/`"label"`/`"is_default"`.
+- `silpo_find_address` takes `{"address": "<free text>"}` and returns
+  `{"success", "summary", "addresses": [...]}`; each entry has
+  `address`/`city`/`street`/`houseNumber`/`district`/`latitude`/`longitude`,
+  no `"id"` (it's a geocode result, not a saved-address record).
+- `silpo_get_available_delivery_types` takes `{"latitude": ..., "longitude": ...}`,
+  sourced from whichever resolved address's coordinates (saved or geocoded).
 """
 
 from dataclasses import dataclass
@@ -25,11 +36,35 @@ from datetime import datetime
 class ResolvedAddress:
     id: str | None
     label: str
+    latitude: float | None
+    longitude: float | None
+
+
+def _build_label(address: dict) -> str:
+    """Human-readable label from a saved address's city/street/building/apartment,
+    e.g. "Вінниця, Варшавська вулиця, 27, кв. 25"."""
+    parts = [address.get("city"), address.get("street"), address.get("building")]
+    if address.get("apartment"):
+        parts.append(f"кв. {address['apartment']}")
+    return ", ".join(str(p) for p in parts if p)
 
 
 def _to_resolved(address: dict) -> ResolvedAddress:
-    label = address.get("address") or address.get("label") or address.get("id")
-    return ResolvedAddress(id=address.get("id"), label=label)
+    # silpo_find_address results already carry a pre-formatted "address" string;
+    # saved addresses don't, so build one from city/street/building/apartment.
+    label = address.get("address") or _build_label(address)
+    return ResolvedAddress(
+        id=address.get("id"),
+        label=label,
+        latitude=address.get("latitude"),
+        longitude=address.get("longitude"),
+    )
+
+
+def _unwrap_addresses(response) -> list[dict]:
+    if isinstance(response, dict):
+        return response.get("addresses") or []
+    return response or []
 
 
 def _pick_from_list_or_new(remaining: list[dict], client, input_fn, print_fn) -> ResolvedAddress | None:
@@ -50,37 +85,39 @@ def _enter_new_address(client, query: str, print_fn) -> ResolvedAddress | None:
     if not query:
         print_fn("No address entered.")
         return None
-    found = client.call("silpo_find_address", {"query": query}) or []
-    if isinstance(found, dict):
-        found = [found]
+    found = _unwrap_addresses(client.call("silpo_find_address", {"address": query}))
     if not found:
         print_fn(f"No address found for '{query}'.")
         return None
-    resolved = _to_resolved(found[0])
-    client.call("silpo_get_available_delivery_types", {"address_id": resolved.id})
-    return resolved
+    return _to_resolved(found[0])
 
 
 def resolve_address(client, log_store, *, input_fn=None, print_fn=None) -> ResolvedAddress | None:
     input_fn = input_fn or input
     print_fn = print_fn or print
 
-    addresses = client.call("silpo_get_my_delivery_addresses") or []
+    addresses = _unwrap_addresses(client.call("silpo_get_my_delivery_addresses"))
     if addresses:
-        default = next((a for a in addresses if a.get("is_default")), addresses[0])
-        default_resolved = _to_resolved(default)
-        answer = input_fn(f"Deliver to {default_resolved.label}? [Y/n] ").strip().lower()
+        first_resolved = _to_resolved(addresses[0])
+        answer = input_fn(f"Deliver to {first_resolved.label}? [Y/n] ").strip().lower()
         if answer in ("", "y", "yes"):
-            resolved = default_resolved
+            resolved = first_resolved
         else:
-            remaining = [a for a in addresses if a is not default]
-            resolved = _pick_from_list_or_new(remaining, client, input_fn, print_fn)
+            resolved = _pick_from_list_or_new(addresses[1:], client, input_fn, print_fn)
     else:
         print_fn("No saved delivery addresses found.")
         query = input_fn("Enter a delivery address: ")
         resolved = _enter_new_address(client, query, print_fn)
 
     if resolved is not None:
+        # A resolved address without coordinates can't establish delivery-type
+        # context (a malformed saved-address entry, e.g.) -- skip rather than
+        # send nulls to the real API.
+        if resolved.latitude is not None and resolved.longitude is not None:
+            client.call(
+                "silpo_get_available_delivery_types",
+                {"latitude": resolved.latitude, "longitude": resolved.longitude},
+            )
         log_store.append_run(
             {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
