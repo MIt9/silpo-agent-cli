@@ -79,15 +79,35 @@ def _run_reorder(
     return 0
 
 
+def _run_clear_context(log_store, input_fn, print_fn) -> int:
+    answer = input_fn(
+        "This will permanently delete your local reorder history and substitution memory. Continue? [y/N] "
+    ).strip().lower()
+    if answer not in ("y", "yes"):
+        print_fn("Aborted: local data left unchanged.")
+        return 0
+    log_store.clear()
+    print_fn("Cleared local reorder history and substitution memory.")
+    return 0
+
+
 _TOP_LEVEL_EPILOG = """\
 First run triggers a one-time browser login (OAuth2.1+PKCE against
 mcp.silpo.ua); the token is cached in your OS keyring afterward, so
 later runs don't re-prompt until it expires.
 
 commands:
-  reorder   rebuild your cart from your typical (frequently-bought) items
+  reorder         rebuild your cart from your typical (frequently-bought) items
+  clear-context   wipe your local reorder history and substitution memory
 
 run 'silpo-agent reorder --help' for reorder's flags and examples.
+"""
+
+_CLEAR_CONTEXT_EPILOG = """\
+deletes the local Reorder Log and Substitution Memory (~/.silpo-agent/
+reorder_log.json) after asking for confirmation -- declining leaves
+everything untouched. Purely local state: never touches the OS keyring
+auth token, your real Silpo cart, or the Silpo servers (no MCP calls).
 """
 
 _REORDER_EPILOG = """\
@@ -122,7 +142,11 @@ examples:
 """
 
 
-def main(argv: list[str] | None = None, *, client=None, log_store=None) -> int:
+def main(
+    argv: list[str] | None = None, *, client=None, log_store=None, input_fn=None, print_fn=None
+) -> int:
+    input_fn = input_fn or input
+    print_fn = print_fn or print
     parser = argparse.ArgumentParser(
         prog="silpo-agent",
         description="Personal CLI wrapper over the Silpo MCP server -- rebuilds your grocery cart from what you "
@@ -171,6 +195,15 @@ def main(argv: list[str] | None = None, *, client=None, log_store=None) -> int:
         "'promos' applies any available loyalty bonuses to the cart before checkout.",
     )
 
+    subparsers.add_parser(
+        "clear-context",
+        help="Wipe your local reorder history and substitution memory",
+        description="Wipe the local Reorder Log and Substitution Memory after confirmation. Purely local state -- "
+        "no MCP calls, and the OS keyring auth token / real Silpo cart are never touched.",
+        epilog=_CLEAR_CONTEXT_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -186,6 +219,9 @@ def main(argv: list[str] | None = None, *, client=None, log_store=None) -> int:
             budget=args.budget,
             optimize=args.optimize,
         )
+
+    if args.command == "clear-context":
+        return _run_clear_context(log_store or ReorderLogStore(), input_fn, print_fn)
 
     return 0
 
