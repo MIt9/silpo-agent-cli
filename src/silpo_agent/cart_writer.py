@@ -1,28 +1,54 @@
 """Cart Writer (see prd_reorder_optimizer.md's Cart Writer section). Before
-adding anything, reads the current cart via `silpo_get_my_shopping_cart` and
+adding anything, reads the current cart's real contents from the caller's
+already-resolved `CartContext` (issue #17's `resolve_cart_context`) and
 warns the user if it already has items from a prior session (CONTEXT.md's
-"Non-empty cart guard" — warn-and-proceed-or-abort, never auto-clear or
+"Non-empty cart guard" -- warn-and-proceed-or-abort, never auto-clear or
 silently merge). Applies the optional `--budget` cap by trimming the
-lowest-priority Typical Items (by frequency) until the total fits, if set —
+lowest-priority Typical Items (by frequency) until the total fits, if set --
 otherwise just totals and reports. Adds the (possibly trimmed) items via
 `silpo_add_or_update_cart_products` and reports what was added, trimmed, and
 the total. Cart-only: never calls checkout/payment (CONTEXT.md's "Reorder
-flow — cart-only scope").
+flow -- cart-only scope").
 
-Schema assumptions (unverified live, see ../../docs/mcp_schema.md):
-`silpo_add_or_update_cart_products` takes `{"items": [{"product_id", "quantity"}]}`
-and each Typical Item is added at quantity 1 — the Order Aggregator's Typical
-Item doesn't carry a usual-quantity signal, so this ticket assumes 1. The
-report's total is computed locally from each item's last known price rather
-than trusting a total in the call's response, since that response shape is
-also unverified. `silpo_get_my_shopping_cart` is assumed to return a dict
-with an `"items"` list (empty/absent means an empty cart) — see
-../../docs/mcp_schema.md for the new assumption recorded for this ticket.
+Real schema (see ../../docs/mcp_schema.md's "Cart tools" section,
+live-verified):
+- `silpo_get_my_shopping_cart` returns only `{"success", "shoppingCartId"}`
+  -- no cart contents, so it is not read here at all. The non-empty-cart
+  guard instead reads `CartContext.products` (issue #17's resolver, which
+  already made the `silpo_get_my_shopping_cart` -> `silpo_get_shopping_cart_by_id`
+  round trip and carries `cart.shipments[0].products`), avoiding a
+  duplicate network call.
+- `silpo_add_or_update_cart_products` takes `{"shoppingCartId", "products":
+  [{"productId", "companyId", "branchId", "quantity", "addQuantity", "comment"}]}`.
+  `companyId`/`branchId` come from the Typical Item (Order Aggregator, #16)
+  or a substitution/promo-resolved item; if either is missing (e.g. a
+  substituted item that didn't carry it through) this falls back to the
+  CartContext's own branch/company, since a cart's items all live under one
+  branch/company already. Each Typical Item is added at quantity 1 with
+  `addQuantity=True` (adds to, rather than overwrites, any existing
+  quantity) -- the Order Aggregator's Typical Item doesn't carry a
+  usual-quantity signal, so this ticket assumes 1, same as before.
+  `comment` is always null; nothing upstream produces one.
+- Plastic-bag-style items (пакет / пакет з пакетів / пакет-майка) are
+  always skipped before the add call, per the tool's own guidance -- see
+  `_is_plastic_bag`. Matched case-insensitively on the item's `name`
+  containing "пакет"; this is a heuristic (Ukrainian-only, substring match)
+  -- good enough for the known plastic-bag SKUs in order history, but an
+  item that lost its `name` during substitution (issue #18's territory)
+  won't be caught. ponytail: substring-on-name heuristic, revisit with a
+  dedicated category/tag from the product record if false negatives show up.
+
+The report's total is still computed locally from each item's last known
+price rather than trusting a total in the add call's response, since that
+response shape remains unverified (mutating tool, not exercised live).
 """
 
 from dataclasses import dataclass, field
 
+from silpo_agent.cart_context import CartContext
 from silpo_agent.order_aggregator import TypicalItem
+
+_PLASTIC_BAG_KEYWORD = "пакет"
 
 
 @dataclass(frozen=True)
@@ -33,9 +59,8 @@ class CartReport:
     aborted: bool = False
 
 
-def _cart_has_items(cart_response) -> bool:
-    items = cart_response.get("items") if isinstance(cart_response, dict) else cart_response
-    return bool(items)
+def _is_plastic_bag(item: TypicalItem) -> bool:
+    return bool(item.name) and _PLASTIC_BAG_KEYWORD in item.name.lower()
 
 
 def _trim_to_budget(items: list[TypicalItem], budget: float) -> tuple[list[TypicalItem], list[TypicalItem]]:
@@ -62,6 +87,7 @@ def _trim_to_budget(items: list[TypicalItem], budget: float) -> tuple[list[Typic
 def write_cart(
     client,
     typical_items: list[TypicalItem],
+    cart_context: CartContext,
     *,
     budget: float | None = None,
     input_fn=None,
@@ -73,18 +99,19 @@ def write_cart(
     if not typical_items:
         return CartReport(items_added=[], total=0.0)
 
-    current_cart = client.call("silpo_get_my_shopping_cart")
-    if _cart_has_items(current_cart):
+    purchasable_items = [item for item in typical_items if not _is_plastic_bag(item)]
+
+    if cart_context.products:
         print_fn("Warning: your cart already has items from a previous session.")
         answer = input_fn("Add to the existing cart anyway? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             print_fn("Aborted: cart left unchanged.")
             return CartReport(items_added=[], total=0.0, aborted=True)
 
-    items_to_add = typical_items
+    items_to_add = purchasable_items
     trimmed_items: list[TypicalItem] = []
     if budget is not None:
-        items_to_add, trimmed_items = _trim_to_budget(typical_items, budget)
+        items_to_add, trimmed_items = _trim_to_budget(purchasable_items, budget)
     trimmed = [(item.product_id, item.last_known_price) for item in trimmed_items]
 
     if not items_to_add:
@@ -92,7 +119,20 @@ def write_cart(
 
     client.call(
         "silpo_add_or_update_cart_products",
-        {"items": [{"product_id": item.product_id, "quantity": 1} for item in items_to_add]},
+        {
+            "shoppingCartId": cart_context.shopping_cart_id,
+            "products": [
+                {
+                    "productId": item.product_id,
+                    "companyId": item.company_id or cart_context.company_id,
+                    "branchId": item.branch_id or cart_context.branch_id,
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+                for item in items_to_add
+            ],
+        },
     )
 
     items_added = [(item.product_id, item.last_known_price) for item in items_to_add]

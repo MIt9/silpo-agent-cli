@@ -16,9 +16,14 @@ stale timeslots) -- surfaced to the user here via `print_fn`, never silently
 dropped, but never blocks the run (deeper handling is out of scope for this
 ticket per issue #17).
 
-Nothing downstream consumes this module's output yet -- that wiring lands in
-the Substitution Resolver fix (#18), Cart Writer fix (#19), and Promo
-Optimizer redesign (#20). This ticket only resolves and surfaces the context.
+`CartContext.products` carries `cart.shipments[0].products` (each with
+`productId`/`companyId`/`branchId`/`quantity`/... per the schema above) so
+the Cart Writer's non-empty-cart guard (#19) can read real cart contents
+without a second `silpo_get_shopping_cart_by_id` call.
+
+Nothing else downstream consumes this module's output yet -- that wiring
+lands in the Substitution Resolver fix (#18) and Promo Optimizer redesign
+(#20).
 """
 
 from dataclasses import dataclass, field
@@ -33,6 +38,7 @@ class CartContext:
     timeslot_start: str | None
     timeslot_end: str | None
     validations: list[dict] = field(default_factory=list)
+    products: list[dict] = field(default_factory=list)
 
 
 def _empty_context(shopping_cart_id: str | None = None) -> CartContext:
@@ -44,6 +50,7 @@ def _empty_context(shopping_cart_id: str | None = None) -> CartContext:
         timeslot_start=None,
         timeslot_end=None,
         validations=[],
+        products=[],
     )
 
 
@@ -74,4 +81,5 @@ def resolve_cart_context(client, *, print_fn=None) -> CartContext:
         timeslot_start=timeslot.get("start"),
         timeslot_end=timeslot.get("end"),
         validations=validations,
+        products=shipment.get("products") or [],
     )

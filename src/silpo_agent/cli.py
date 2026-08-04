@@ -2,13 +2,16 @@
 PRD's module order: Address Resolver -> Cart Context Resolver -> Order
 Aggregator -> Substitution Resolver -> (optional) Promo Optimizer -> Cart
 Writer -> report. Cart Context Resolver resolves branchId/companyId/
-deliveryType/timeslot (see cart_context.py) -- nothing downstream consumes it
-yet as of issue #17; that wiring lands in follow-up tickets (#18-#20). Cart
-Writer owns the non-empty cart guard (warn-and-proceed-or-abort) and the
-optional `--budget` trim; the CLI only parses `--budget` and reports the
-outcome. Promo Optimizer runs only when `--optimize promos` is passed -- the
-module isn't even called otherwise, so a plain `reorder` makes zero
-promo-related MCP calls (CONTEXT.md's "Promo optimization" entry).
+deliveryType/timeslot/products (see cart_context.py); its `CartContext` is
+threaded through to Cart Writer (issue #19) as the source of truth for the
+non-empty-cart guard and the branch/company fallback on each add-to-cart
+item -- no other module consumes it yet, that wiring lands in follow-up
+tickets (#18, #20). Cart Writer owns the non-empty cart guard
+(warn-and-proceed-or-abort) and the optional `--budget` trim; the CLI only
+parses `--budget` and reports the outcome. Promo Optimizer runs only when
+`--optimize promos` is passed -- the module isn't even called otherwise, so
+a plain `reorder` makes zero promo-related MCP calls (CONTEXT.md's "Promo
+optimization" entry).
 """
 
 import argparse
@@ -32,7 +35,7 @@ def _run_reorder(
         print("reorder: no delivery address resolved; aborting before product search", file=sys.stderr)
         return 1
 
-    resolve_cart_context(client)
+    cart_context = resolve_cart_context(client)
 
     orders = client.call("silpo_get_my_online_orders") or []
     try:
@@ -49,7 +52,7 @@ def _run_reorder(
         promo_result = optimize_promos(client, items)
         items = promo_result.items
 
-    report = write_cart(client, items, budget=budget)
+    report = write_cart(client, items, cart_context, budget=budget)
 
     if address:
         print(f"Delivering to: {address.label}")
