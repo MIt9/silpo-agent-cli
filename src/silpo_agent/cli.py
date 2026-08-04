@@ -1,11 +1,14 @@
 """silpo-agent CLI entrypoint. `reorder` wires the pipeline together per the
-PRD's module order: Address Resolver -> Order Aggregator -> Substitution
-Resolver -> (optional) Promo Optimizer -> Cart Writer -> report. Cart Writer
-owns the non-empty cart guard (warn-and-proceed-or-abort) and the optional
-`--budget` trim; the CLI only parses `--budget` and reports the outcome.
-Promo Optimizer runs only when `--optimize promos` is passed -- the module
-isn't even called otherwise, so a plain `reorder` makes zero promo-related
-MCP calls (CONTEXT.md's "Promo optimization" entry).
+PRD's module order: Address Resolver -> Cart Context Resolver -> Order
+Aggregator -> Substitution Resolver -> (optional) Promo Optimizer -> Cart
+Writer -> report. Cart Context Resolver resolves branchId/companyId/
+deliveryType/timeslot (see cart_context.py) -- nothing downstream consumes it
+yet as of issue #17; that wiring lands in follow-up tickets (#18-#20). Cart
+Writer owns the non-empty cart guard (warn-and-proceed-or-abort) and the
+optional `--budget` trim; the CLI only parses `--budget` and reports the
+outcome. Promo Optimizer runs only when `--optimize promos` is passed -- the
+module isn't even called otherwise, so a plain `reorder` makes zero
+promo-related MCP calls (CONTEXT.md's "Promo optimization" entry).
 """
 
 import argparse
@@ -13,6 +16,7 @@ import sys
 
 from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient
+from silpo_agent.cart_context import resolve_cart_context
 from silpo_agent.cart_writer import write_cart
 from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
@@ -27,6 +31,8 @@ def _run_reorder(
     if address is None:
         print("reorder: no delivery address resolved; aborting before product search", file=sys.stderr)
         return 1
+
+    resolve_cart_context(client)
 
     orders = client.call("silpo_get_my_online_orders") or []
     try:
