@@ -79,7 +79,7 @@ def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart
     ) in client.calls
 
 
-def test_reorder_reports_substitutions_and_unavailable_items(capsys, monkeypatch, tmp_path):
+def test_reorder_reports_unavailable_items(capsys, monkeypatch, tmp_path):
     orders = [{"items": [{"product_id": "milk", "price": 45.0}, {"product_id": "eggs", "price": 60.0}]}]
     client = FakeClient(
         {
@@ -101,6 +101,36 @@ def test_reorder_reports_substitutions_and_unavailable_items(capsys, monkeypatch
     assert "Unavailable" in out
     assert "milk" in out and "eggs" in out
     assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_reorder_reports_substitution_when_auto_applied(capsys, monkeypatch, tmp_path):
+    """A 1-candidate auto-substitution must actually show up in the printed
+    report, not just get silently added to the cart under its replacement id.
+    """
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": False},
+            "silpo_get_replacements": [{"product_id": "milk-oat", "price": 50.0}],
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Substituted milk -> milk-oat" in out
+    assert "Unavailable" not in out
+    assert (
+        "silpo_add_or_update_cart_products",
+        {"items": [{"product_id": "milk-oat", "quantity": 1}]},
+    ) in client.calls
 
 
 def test_reorder_with_insufficient_orders_errors_without_touching_cart(capsys, monkeypatch, tmp_path):
