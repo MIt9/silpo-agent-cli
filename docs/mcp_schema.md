@@ -848,3 +848,115 @@ second, duplicate call with the same lat/lon).
   `timeslot_end` are left `None` even after a successful fallback, since
   `silpo_get_available_delivery_types` carries no timeslot data; a real
   timeslot needs a separate `silpo_get_time_slots` call, out of scope here.
+- **Update (issue #37, same day)**: the "still unconfirmed live" note above
+  is now out of date -- issue #37's `delivery` command live-verified
+  `silpo_get_available_delivery_types`'s real response shape (see the next
+  section). Real top-level key is `"options"`, not `"deliveryTypes"`, and
+  there is no top-level `branchId`/`companyId` -- so
+  `_branch_context_from_delivery_types`'s defensive multi-shape guess above
+  doesn't match the confirmed shape (`{"options": [{"deliveryType",
+  "branchId", "description"}]}`) on either branch it tries. Left as-is here
+  since fixing another ticket's already-merged code is out of scope for
+  #37; flagging it for a follow-up on #29's own module.
+
+## Live-verified: delivery-settings tools (2026-08-05, issue #37)
+
+Direct live calls against the same authenticated connection as the earlier
+sweeps, made while building the `delivery` command
+(`silpo_agent/delivery_settings.py`).
+
+- **`silpo_get_available_delivery_types`'s response shape** was unconfirmed
+  before this ticket (only the request shape had been live-verified). Real
+  response: `{"success": true, "summary": "Found 3 delivery options for "
+  <lat>, <lon>"", "options": [{"deliveryType": "DeliveryHome", "branchId":
+  "<uuid>", "description": "Regular delivery (groceries, fresh products)"},
+  {"deliveryType": "NovaPoshta", "branchId": null, "description": "..."},
+  {"deliveryType": "SelfPickup", "branchId": null, "description": "..."}]}`.
+  Top-level key is **`"options"`**, not `"deliveryTypes"` as
+  `prd_delivery_context_coupons.md` assumed. `branchId` is populated only
+  for types resolvable directly from coordinates (`DeliveryHome`/
+  `WideAssortDelivery`/`B2B`, per the tool's own description); `NovaPoshta`/
+  `SelfPickup` come back with `branchId: null` and need their own follow-up
+  lookups (`silpo_list_branches`, `silpo_find_nova_poshta_*`) -- out of
+  scope here, left to issue #38.
+- **`silpo_update_shopping_cart`'s own tool description** (read directly
+  from the live tool definition, not guessed) spells out per-delivery-type
+  address construction: for `DeliveryExpressByPromise`, copy
+  address/shipments/timeslot from the current cart as-is and only change
+  `deliveryType`. For `NovaPoshta`/`SelfPickup`, build a fresh address
+  object from settlement/office/branch data (differently shaped for each).
+  **For every other delivery type (including `DeliveryHome`), the address
+  object "MUST be passed exactly as received from
+  `silpo_get_shopping_cart_by_id` ... Do NOT construct the address
+  manually -- always copy it from the cart response. The shipments array
+  must also come from the cart response."** This directly confirms the
+  precedent `promo_optimizer.py` (issue #20) already established --
+  `CartContext.address`/`.shipments` are meant to be copied through, not
+  reconstructed field-by-field.
+- **`silpo_get_time_slots`**: confirmed the request only needs `branchId`
+  (everything else -- `deliveryTypes`/`start`/`end`/`limit` -- is optional).
+  `delivery_settings.py` passes `branchId` + `deliveryTypes: ["DeliveryHome"]`
+  only, letting the server default the time window, and filters the
+  response client-side to `available: true` slots before offering choices
+  (matching the tool's own "Only pick slots where available=true" guidance).
+
+## Assumptions made in issue #37 (Delivery Settings / `delivery` command)
+
+- **Address object for a newly-picked `DeliveryHome` address is NOT fully
+  reconstructed.** `address_resolver.py`'s `ResolvedAddress` (reused as-is,
+  per this ticket's instructions) only carries `id`/`label`/`latitude`/
+  `longitude` -- no `street`/`house`/`flat`/`floor`/`entrance`/etc. Given
+  the live tool description above explicitly says not to hand-construct
+  this address, `delivery_settings.py` takes `CartContext.address` (the
+  existing cart's address object, in the exact shape
+  `silpo_get_shopping_cart_by_id` returns) as a template and overrides only
+  `latitude`/`longitude` (as strings, matching the live-observed shape --
+  `cart.address.latitude`/`.longitude` are strings even though the saved
+  -address record's own `latitude`/`longitude` are floats) with the newly
+  resolved address's coordinates. Every other field (`city`/`street`/
+  `house`/`flat`/`floor`/`entrance`/`courrierComment`/etc.) is carried over
+  unchanged from whatever address was already on the cart. **Practical
+  effect: switching to a saved address whose street/building differs from
+  what's currently on the cart will send the new address's coordinates but
+  the old address's display fields** -- a known limitation, not silently
+  wrong data (the coordinates, which determine which branch/company can
+  serve the order, are correct), but worth fixing properly if this bites in
+  practice (would need a saved-address lookup keyed by the resolved
+  address's `id`, exposing its full raw record -- a change to
+  `address_resolver.py`'s public surface, deliberately out of scope here
+  per "reuse `resolve_address` as-is, don't duplicate its logic").
+- **A cart context with no existing `address`/`shipments` has no template
+  to copy from** and `delivery` fails clearly in that case (prints a
+  message, applies nothing) rather than guessing a full postal address from
+  scratch. This mirrors issue #20's "narrow scope over an unreliable guess"
+  precedent for the promo-swap feature.
+- **`shipments[].companyId` is kept from the existing cart shipment**,
+  only `branchId` is overridden (to the chosen delivery type's `branchId`
+  from `silpo_get_available_delivery_types`). Assumption: one company
+  serves all branches for a given account -- every live-observed cart/
+  product record in this project so far has shared one `companyId`
+  (`1ec88c5d-a050-669c-8467-570a157f3e31` in this session's live account),
+  and `silpo_get_available_delivery_types` doesn't return a `companyId` to
+  use instead.
+- **Update (post-#29 rebase)**: the note originally here described
+  `resolve_address()`'s internal `silpo_get_available_delivery_types` call
+  as redundant with this module's own separate delivery-type listing call.
+  Issue #29 (merged after this ticket was first written) added
+  `ResolvedAddress.delivery_types`, exposing that same call's raw response
+  for reuse -- `delivery_settings.py` now reads `resolved_address
+  .delivery_types` directly instead of making its own call, so the
+  duplicate call no longer happens. `resolve_cart_context` is also now
+  called with `resolved_address=` (both the pre-apply template fetch and
+  the post-apply re-check) so its own no-shipments fallback (#29) reuses
+  the same resolved address instead of prompting a second time.
+- **Post-apply "newly unavailable" report** cross-references
+  `calculation.validations[]` entries where `type == "product"` and
+  `context.productId` is present (the shape confirmed by the earlier
+  `product.offer.stock.max` example above) against the pre-update cart's
+  `products`, matching by `productId`. Any other product-level validation
+  `message` is treated the same way (flagged), since no second live example
+  of a different `type: "product"` validation message has been observed to
+  confirm whether `context.productId` is present on all of them -- if a
+  future live run finds one without it, that entry is silently skipped by
+  this logic rather than crashing (defensive `isinstance`/`.get()` checks
+  throughout `_newly_unavailable`).

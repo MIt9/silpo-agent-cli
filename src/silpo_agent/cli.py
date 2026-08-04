@@ -23,6 +23,7 @@ from silpo_agent.auth import MCPClient
 from silpo_agent.cart_context import resolve_cart_context
 from silpo_agent.cart_writer import write_cart
 from silpo_agent.coupons_lister import list_coupons
+from silpo_agent.delivery_settings import run_delivery_settings
 from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
 from silpo_agent.promo_optimizer import optimize_promos
@@ -82,6 +83,11 @@ def _run_reorder(
     return 0
 
 
+def _run_delivery(client, log_store, input_fn, print_fn) -> int:
+    result = run_delivery_settings(client, log_store, input_fn=input_fn, print_fn=print_fn)
+    return 0 if result.applied else 1
+
+
 def _run_clear_context(log_store, input_fn, print_fn) -> int:
     answer = input_fn(
         "This will permanently delete your local reorder history and substitution memory. Continue? [y/N] "
@@ -111,6 +117,7 @@ later runs don't re-prompt until it expires.
 
 commands:
   reorder         rebuild your cart from your typical (frequently-bought) items
+  delivery        explicitly set your delivery address, delivery type, and timeslot
   clear-context   wipe your local reorder history and substitution memory
   coupons         list your active loyalty coupons (read-only)
 
@@ -122,6 +129,25 @@ deletes the local Reorder Log and Substitution Memory (~/.silpo-agent/
 reorder_log.json) after asking for confirmation -- declining leaves
 everything untouched. Purely local state: never touches the OS keyring
 auth token, your real Silpo cart, or the Silpo servers (no MCP calls).
+"""
+
+_DELIVERY_EPILOG = """\
+what it does, in order:
+  1. confirms your delivery address (same address confirmation as reorder --
+     proposes the first saved address, or pick a different one/type a new one)
+  2. lists delivery types available at that address and asks you to pick one
+     -- only DeliveryHome (regular home delivery) is supported end to end
+     right now; picking anything else stops here without changing anything
+  3. lists real available timeslots at that delivery type's branch and asks
+     you to pick one
+  4. applies the address, delivery type, and timeslot together in a single
+     update to your real Silpo cart
+  5. reports which items already in your cart are now unavailable under the
+     new delivery context -- purely informational, nothing is removed or
+     swapped automatically
+
+interactive only -- no flags. an invalid or out-of-range choice at any step
+aborts cleanly without applying anything.
 """
 
 _REORDER_EPILOG = """\
@@ -210,6 +236,15 @@ def main(
     )
 
     subparsers.add_parser(
+        "delivery",
+        help="Explicitly set delivery address, delivery type, and timeslot",
+        description="Explicitly set your delivery address, delivery type, and timeslot together, in one real "
+        "update to your Silpo cart. DeliveryHome only for now; other delivery types are a follow-up.",
+        epilog=_DELIVERY_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    subparsers.add_parser(
         "clear-context",
         help="Wipe your local reorder history and substitution memory",
         description="Wipe the local Reorder Log and Substitution Memory after confirmation. Purely local state -- "
@@ -241,6 +276,9 @@ def main(
             budget=args.budget,
             optimize=args.optimize,
         )
+
+    if args.command == "delivery":
+        return _run_delivery(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     if args.command == "clear-context":
         return _run_clear_context(log_store or ReorderLogStore(), input_fn, print_fn)
