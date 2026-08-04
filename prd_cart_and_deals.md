@@ -48,6 +48,7 @@ Four new read-facing capabilities, plus one write capability, all built on the s
 - All five capabilities reuse the existing `MCPClient`/`CartContext` infrastructure `reorder` already established — no new auth or cart-context resolution logic.
 - `cart edit` and its non-interactive `--replace` flag are the only new capability that mutates the real cart; everything else (`cart`, `cart promos`, `deals`, `favorites-deals`) is strictly read-only.
 - Considered and explicitly rejected: giving items on the user's favorites list special priority in `reorder`'s existing typical-item selection. Out of scope for this PRD and not planned.
+- The existing plastic-bag filter (`cart_writer.py`'s `_is_plastic_bag`, name-based, already used by `reorder`) extends to every read-facing list this PRD introduces — `deals`, `cart promos`, and the free-text search results inside `cart edit`. Bags are irrelevant to all of these: they're added automatically when the order is assembled, never something the user needs to search for, discover a deal on, or manually pick as a replacement.
 
 ## Testing Decisions
 
