@@ -86,3 +86,18 @@ def test_no_available_bonuses_makes_no_update_cart_call():
 
     assert result.bonuses_applied == []
     assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+
+
+def test_bonus_entry_missing_id_is_dropped_not_crashed_on():
+    client = FakeClient(
+        {
+            "silpo_get_promo_equivalent": None,
+            "silpo_get_available_bonuses": [{"id": "bonus-1"}, {"label": "no id here"}],
+        }
+    )
+    item = TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0)
+
+    result = optimize_promos(client, [item])
+
+    assert result.bonuses_applied == ["bonus-1"]
+    assert ("silpo_update_shopping_cart", {"bonus_ids": ["bonus-1"]}) in client.calls

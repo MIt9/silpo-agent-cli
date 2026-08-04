@@ -63,7 +63,8 @@ def optimize_promos(client, items: list[TypicalItem]) -> PromoResult:
             swaps.append((item.product_id, promo_item.product_id))
 
     bonuses = client.call("silpo_get_available_bonuses") or []
-    bonus_ids = [bonus.get("id") if isinstance(bonus, dict) else bonus for bonus in bonuses]
+    raw_ids = (bonus.get("id") if isinstance(bonus, dict) else bonus for bonus in bonuses)
+    bonus_ids = [bonus_id for bonus_id in raw_ids if bonus_id]
     if bonus_ids:
         client.call("silpo_update_shopping_cart", {"bonus_ids": bonus_ids})
 
