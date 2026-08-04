@@ -71,3 +71,7 @@ class ReorderLogStore:
 
     def get_substitution(self, item_id: str) -> str | None:
         return self._load()["substitutions"].get(item_id)
+
+    def clear(self) -> None:
+        with self._locked():
+            self._save({"runs": [], "substitutions": {}})

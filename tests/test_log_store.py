@@ -66,6 +66,25 @@ def test_substitution_memory_unknown_item_returns_none(tmp_path):
     assert store.get_substitution("never-set") is None
 
 
+def test_clear_wipes_runs_and_substitutions(tmp_path):
+    store = ReorderLogStore(tmp_path / "reorder_log.json")
+    store.append_run({"timestamp": "2026-08-04T10:00:00", "items_added": ["milk"], "substitutions": {}, "address": "A", "total": 10})
+    store.set_substitution("milk-1l", "milk-1l-oat")
+
+    store.clear()
+
+    assert store.read_history() == []
+    assert store.get_substitution("milk-1l") is None
+
+
+def test_clear_on_already_empty_store_does_not_error(tmp_path):
+    store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    store.clear()
+
+    assert store.read_history() == []
+
+
 def test_concurrent_writes_do_not_lose_updates(tmp_path):
     """A single `reorder` run can call append_run (address audit) and
     set_substitution (once per freshly-chosen replacement) several times.
