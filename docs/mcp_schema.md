@@ -63,3 +63,46 @@ token in the OS keyring), run `client.call("tools/list", {})` — or add a
 one-off `silpo-agent debug-schema` command — and replace this section with
 the real field names before the Order Aggregator / Address Resolver tickets
 build assumptions on top of them.
+
+## Assumptions made in issue #3 (minimal reorder happy path)
+
+Still no live-verified schema available at implementation time, so the
+`reorder` command's happy path (`silpo_agent/order_aggregator.py`,
+`silpo_agent/cart_writer.py`, `silpo_agent/cli.py`) makes these additional,
+narrower assumptions on top of the ones above:
+
+- **`silpo_get_my_online_orders` order shape**: each order is a dict with an
+  `"items"` list; each line item has `"product_id"` and `"price"`. The tool
+  is assumed to already return only confirmed/paid orders (per the PRD's
+  user story 2 and CONTEXT.md's "Reorder log" entry) — the Order Aggregator
+  does not filter on a paid/confirmed status field itself.
+- **Order recency ordering**: orders are assumed to come back **newest
+  first**. `derive_typical_items` takes the first `last` entries as "the N
+  most recent orders" and, for "last known price," keeps the price from the
+  first (i.e. most recent) order it sees an item in. If the live API
+  actually returns oldest-first or unordered, this needs a sort-by-timestamp
+  step once the real date field name is confirmed.
+- **`silpo_get_my_online_orders` call args**: called with no arguments
+  (`client.call("silpo_get_my_online_orders")`); `--last`/`--threshold`
+  slicing happens locally in the pure Order Aggregator, not via an API-side
+  limit param. If the live tool paginates or caps results below what `--last`
+  needs, this will under-count rather than error — worth revisiting once the
+  real response shape (and any limit/page params) is confirmed.
+- **`silpo_get_my_delivery_addresses` shape**: assumed to return a list of
+  dicts, each optionally with `"is_default"` (bool) and `"address"` and/or
+  `"id"`. The CLI picks the entry with `"is_default"` true, falling back to
+  the first entry, and only uses it to print "Delivering to: ..." in the
+  report — it is **not** passed into `silpo_add_or_update_cart_products`,
+  since that call's parameter for branch/address context is unconfirmed.
+  Assumed the account's currently active address is used server-side by
+  default. Revisit once the real schema — and whether cart writes need an
+  explicit branch/address id — is confirmed.
+- **`silpo_add_or_update_cart_products` request shape**: assumed to accept
+  `{"items": [{"product_id": ..., "quantity": ...}]}`. Each Typical Item is
+  added at `quantity: 1` — the Order Aggregator's Typical Item (product id,
+  frequency, last known price) has no usual-quantity signal, so quantity
+  logic is out of scope for this ticket.
+- **Report total**: computed locally as the sum of each added item's last
+  known price, rather than trusting a total in
+  `silpo_add_or_update_cart_products`'s response — that response shape is
+  also unconfirmed.
