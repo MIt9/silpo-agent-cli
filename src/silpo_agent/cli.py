@@ -1,9 +1,11 @@
 """silpo-agent CLI entrypoint. `reorder` wires the pipeline together per the
 PRD's module order: Address Resolver -> Order Aggregator -> Substitution
-Resolver -> Cart Writer -> report. Cart Writer owns the non-empty cart guard
-(warn-and-proceed-or-abort) and the optional `--budget` trim; the CLI only
-parses `--budget` and reports the outcome. Promo optimization is a separate,
-not-yet-built ticket.
+Resolver -> (optional) Promo Optimizer -> Cart Writer -> report. Cart Writer
+owns the non-empty cart guard (warn-and-proceed-or-abort) and the optional
+`--budget` trim; the CLI only parses `--budget` and reports the outcome.
+Promo Optimizer runs only when `--optimize promos` is passed -- the module
+isn't even called otherwise, so a plain `reorder` makes zero promo-related
+MCP calls (CONTEXT.md's "Promo optimization" entry).
 """
 
 import argparse
@@ -14,10 +16,13 @@ from silpo_agent.auth import MCPClient
 from silpo_agent.cart_writer import write_cart
 from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
+from silpo_agent.promo_optimizer import optimize_promos
 from silpo_agent.substitution_resolver import resolve_substitutions
 
 
-def _run_reorder(last: int, threshold: float, client, log_store, budget: float | None = None) -> int:
+def _run_reorder(
+    last: int, threshold: float, client, log_store, budget: float | None = None, optimize: str | None = None
+) -> int:
     address = resolve_address(client, log_store)
     if address is None:
         print("reorder: no delivery address resolved; aborting before product search", file=sys.stderr)
@@ -31,7 +36,14 @@ def _run_reorder(last: int, threshold: float, client, log_store, budget: float |
         return 1
 
     substitution_result = resolve_substitutions(client, log_store, typical_items)
-    report = write_cart(client, substitution_result.items, budget=budget)
+
+    items = substitution_result.items
+    promo_result = None
+    if optimize == "promos":
+        promo_result = optimize_promos(client, items)
+        items = promo_result.items
+
+    report = write_cart(client, items, budget=budget)
 
     if address:
         print(f"Delivering to: {address.label}")
@@ -39,6 +51,11 @@ def _run_reorder(last: int, threshold: float, client, log_store, budget: float |
         print(f"Substituted {original_id} -> {replacement_id}")
     if substitution_result.unavailable:
         print(f"Unavailable ({len(substitution_result.unavailable)}): {', '.join(substitution_result.unavailable)}")
+    if promo_result is not None:
+        for original_id, promo_id in promo_result.swaps:
+            print(f"Promo swap: {original_id} -> {promo_id}")
+        if promo_result.bonuses_applied:
+            print(f"Applied bonuses/promo codes: {', '.join(promo_result.bonuses_applied)}")
 
     if report.aborted:
         return 1
@@ -65,6 +82,12 @@ def main(argv: list[str] | None = None, *, client=None, log_store=None) -> int:
     reorder_parser.add_argument(
         "--budget", type=float, default=None, help="Optional spend cap; trims lowest-priority items to fit"
     )
+    reorder_parser.add_argument(
+        "--optimize",
+        choices=["promos"],
+        default=None,
+        help="Opt-in promo optimization: swap for cheaper promo equivalents and apply bonuses/promo codes",
+    )
 
     args = parser.parse_args(argv)
 
@@ -74,7 +97,12 @@ def main(argv: list[str] | None = None, *, client=None, log_store=None) -> int:
 
     if args.command == "reorder":
         return _run_reorder(
-            args.last, args.threshold, client or MCPClient(), log_store or ReorderLogStore(), budget=args.budget
+            args.last,
+            args.threshold,
+            client or MCPClient(),
+            log_store or ReorderLogStore(),
+            budget=args.budget,
+            optimize=args.optimize,
         )
 
     return 0
