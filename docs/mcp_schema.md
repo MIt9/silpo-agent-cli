@@ -153,3 +153,42 @@ of the ones above:
   running product search without it would produce results for the wrong
   branch. Revisit only if a future ticket wants a "search anyway, ungated"
   fallback.
+
+## Assumptions made in issue #5 (out-of-stock substitution flow with memory)
+
+Still no live-verified schema at implementation time. `silpo_agent/substitution_resolver.py`
+adds availability-checking and replacement resolution on top of the ones
+above:
+
+- **Availability check tool/shape**: no availability-check tool name is
+  given anywhere in the PRD, CONTEXT.md, or this ticket's issue text — only
+  "checks current availability" is specified. Assumed a tool named
+  `silpo_check_availability` taking `{"product_id": "<id>"}` and returning
+  `{"available": <bool>}`. This is the least-confirmed assumption in this
+  ticket (an outright invented tool name, not one referenced anywhere in the
+  PRD's module list) — revisit first once `tools/list` is inspected live;
+  the real tool may instead be a field on the product-search response rather
+  than a standalone call.
+- **`silpo_get_replacements` request/response shape**: assumed to accept
+  `{"product_id": "<id>"}` and return a list of candidate dicts shaped like
+  `{"product_id": ..., "price": ...}` (or a single dict for one candidate,
+  normalized to a one-item list — same pattern as `address_resolver`'s
+  `silpo_find_address` handling). A candidate missing `"price"` falls back to
+  the original Typical Item's last known price.
+- **Substitution Memory key/value**: reuses `ReorderLogStore.set_substitution` /
+  `get_substitution` (already built in the foundations ticket) — keyed by the
+  *original* typical item's `product_id`, valued by the chosen replacement's
+  `product_id`. If a later run's candidate list no longer contains the
+  remembered replacement id, the remembered id is still applied (per the
+  PRD's "reuse without asking"); its price falls back to the original item's
+  last known price since the candidate list can't supply one.
+- **Invalid user pick handling**: an out-of-range or non-numeric pick when
+  asked to choose among multiple candidates is treated the same as zero
+  candidates (item reported unavailable, run continues) rather than
+  re-prompting or crashing — not specified by the acceptance criteria, chosen
+  for consistency with `address_resolver`'s existing out-of-range handling.
+- **Pipeline placement**: `cli.py` now calls `resolve_substitutions` on the
+  Order Aggregator's `typical_items` output and passes its `.items` into
+  `write_cart`, per the PRD order Address Resolver -> Order Aggregator ->
+  Substitution Resolver -> Cart Writer. Substitution/unavailable reporting
+  lines are printed before the "Added N item(s)" line.

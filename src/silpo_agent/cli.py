@@ -1,7 +1,7 @@
 """silpo-agent CLI entrypoint. `reorder` wires the pipeline together per the
-PRD's module order: Address Resolver -> Order Aggregator -> Cart Writer ->
-report. Substitution handling, promo optimization, and budget cap are
-separate tickets (#5, #6) — not built here.
+PRD's module order: Address Resolver -> Order Aggregator -> Substitution
+Resolver -> Cart Writer -> report. Promo optimization and budget cap are a
+separate ticket (#6) — not built here.
 """
 
 import argparse
@@ -12,6 +12,7 @@ from silpo_agent.auth import MCPClient
 from silpo_agent.cart_writer import write_cart
 from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
+from silpo_agent.substitution_resolver import resolve_substitutions
 
 
 def _run_reorder(last: int, threshold: float, client, log_store) -> int:
@@ -27,10 +28,15 @@ def _run_reorder(last: int, threshold: float, client, log_store) -> int:
         print(f"reorder: {exc}", file=sys.stderr)
         return 1
 
-    report = write_cart(client, typical_items)
+    substitution_result = resolve_substitutions(client, log_store, typical_items)
+    report = write_cart(client, substitution_result.items)
 
     if address:
         print(f"Delivering to: {address.label}")
+    for original_id, replacement_id in substitution_result.substitutions:
+        print(f"Substituted {original_id} -> {replacement_id}")
+    if substitution_result.unavailable:
+        print(f"Unavailable ({len(substitution_result.unavailable)}): {', '.join(substitution_result.unavailable)}")
     print(f"Added {len(report.items_added)} item(s):")
     for product_id, price in report.items_added:
         print(f"  - {product_id}: {price:.2f}")
