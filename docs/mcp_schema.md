@@ -725,10 +725,18 @@ judgment call made here:
   same precedent as issue #19 extending `CartContext` for `.products`).
   `optimize_promos(client, items, cart_context)` calls
   `silpo_update_shopping_cart` with `bonusRequested=cart_context.bonus_available`
-  only when that value is truthy and a `shoppingCartId` is resolved; no
-  bonus (`None`/`0`) or an unresolved cart context (first-ever run) makes
+  only when that value is truthy AND `shoppingCartId`/`deliveryType`/
+  `timeslot`/`address`/`shipments` are all present on `cart_context` — the
+  last four are required verbatim by the call, so a resolved-but-incomplete
+  context (e.g. no shipments recorded yet, a legitimate `CartContext` state)
+  skips the call rather than send `None` into a required field, same guard
+  style as Substitution Resolver's (#18) no-cart-context skip. No bonus
+  (`None`/`0`) or an unresolved cart context (first-ever run) also makes
   zero calls, mirroring the "nothing to do, no call" pattern used by Cart
-  Writer (#19) and Substitution Resolver (#18).
+  Writer (#19). The call's response is checked too (`response.get("success")`,
+  the envelope every real tool response uses per this doc) before reporting
+  `bonus_applied` — a mutating call's success is never assumed silently, per
+  code review on the #20 PR.
 - **`promoCode` intentionally left `null`**: `silpo_get_promo_codes()`
   returned an empty list for the live test account, so there is no verified
   case to apply a promo code against — the issue explicitly said not to

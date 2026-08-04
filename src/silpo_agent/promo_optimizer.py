@@ -50,19 +50,42 @@ class PromoResult:
 
 def optimize_promos(client, items: list[TypicalItem], cart_context: CartContext) -> PromoResult:
     bonus = cart_context.bonus_available
-    if not bonus or not cart_context.shopping_cart_id:
+    # silpo_update_shopping_cart requires shoppingCartId/deliveryType/timeslot/
+    # address/shipments all present (the last four copied from
+    # silpo_get_shopping_cart_by_id verbatim, per that tool's own
+    # description) -- a resolved-but-incomplete CartContext (e.g. no
+    # shipments recorded yet) must skip the call rather than send nulls
+    # into required fields, same guard style as substitution_resolver.py's
+    # no-cart-context skip (issue #18).
+    has_required_context = (
+        cart_context.shopping_cart_id
+        and cart_context.delivery_type
+        and cart_context.timeslot
+        and cart_context.address
+        and cart_context.shipments
+    )
+    if not bonus or not has_required_context:
         return PromoResult(items=items)
 
-    client.call(
-        "silpo_update_shopping_cart",
-        {
-            "shoppingCartId": cart_context.shopping_cart_id,
-            "deliveryType": cart_context.delivery_type,
-            "timeslot": cart_context.timeslot,
-            "address": cart_context.address,
-            "shipments": cart_context.shipments,
-            "bonusRequested": bonus,
-            "promoCode": None,
-        },
+    response = (
+        client.call(
+            "silpo_update_shopping_cart",
+            {
+                "shoppingCartId": cart_context.shopping_cart_id,
+                "deliveryType": cart_context.delivery_type,
+                "timeslot": cart_context.timeslot,
+                "address": cart_context.address,
+                "shipments": cart_context.shipments,
+                "bonusRequested": bonus,
+                "promoCode": None,
+            },
+        )
+        or {}
     )
+    # Mutating call -- don't claim the bonus was applied unless the response
+    # says so (every real response in this MCP server is enveloped in
+    # {"success": bool, ...}, per docs/mcp_schema.md).
+    if not response.get("success"):
+        return PromoResult(items=items)
+
     return PromoResult(items=items, bonus_applied=bonus)

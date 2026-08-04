@@ -31,7 +31,7 @@ def _context(**overrides):
 
 
 def test_available_bonus_is_applied_via_update_shopping_cart():
-    client = FakeClient()
+    client = FakeClient({"silpo_update_shopping_cart": {"success": True}})
     item = TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0)
     context = _context()
 
@@ -97,3 +97,35 @@ def test_unresolved_cart_context_makes_no_calls():
     assert result.items == [item]
     assert result.bonus_applied is None
     assert client.calls == []
+
+
+def test_missing_address_or_timeslot_makes_no_update_cart_call():
+    """A resolved cart context can still legitimately lack address/timeslot
+    (e.g. no shipments recorded yet, per test_cart_context.py's own
+    fixtures) -- silpo_update_shopping_cart requires shipments/address/
+    timeslot/deliveryType to be copied from silpo_get_shopping_cart_by_id
+    as-is, so sending nulls into those required fields must be avoided,
+    same guard style as substitution_resolver.py's no-cart-context skip."""
+    client = FakeClient()
+    item = TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0)
+    context = _context(address=None, timeslot=None)
+
+    result = optimize_promos(client, [item], context)
+
+    assert result.items == [item]
+    assert result.bonus_applied is None
+    assert client.calls == []
+
+
+def test_update_shopping_cart_failure_does_not_claim_bonus_applied():
+    """The mutating call's response isn't blindly trusted -- an explicit
+    success=False must not be reported to the user as an applied bonus."""
+    client = FakeClient({"silpo_update_shopping_cart": {"success": False}})
+    item = TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0)
+    context = _context()
+
+    result = optimize_promos(client, [item], context)
+
+    assert result.items == [item]
+    assert result.bonus_applied is None
+    assert any(call[0] == "silpo_update_shopping_cart" for call in client.calls)  # the call still happened

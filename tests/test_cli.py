@@ -573,6 +573,7 @@ def test_reorder_optimize_promos_applies_available_bonus(capsys, monkeypatch, tm
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk"),
+            "silpo_update_shopping_cart": {"success": True},
             **_resolved_cart_context(bonus_available=24.27),
         }
     )
