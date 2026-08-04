@@ -678,3 +678,46 @@ def test_clear_context_makes_no_mcp_calls(tmp_path):
     main(["clear-context"], client=client, log_store=log_store, input_fn=lambda prompt="": "y", print_fn=lambda *a: None)
 
     assert client.calls == []
+
+
+def test_coupons_command_lists_active_coupons(capsys):
+    client = FakeClient(
+        {
+            "silpo_get_my_coupons": {
+                "success": True,
+                "summary": "Found 1 coupons",
+                "coupons": [
+                    {
+                        "id": "c1",
+                        "active": True,
+                        "beginDate": "2026-08-01",
+                        "endDate": "2026-08-31",
+                        "description": "за купівлю вершкового масла",
+                    }
+                ],
+            },
+            "silpo_get_coupon_details": {
+                "success": True,
+                "coupon": {"id": "c1", "rewardText": "-20% на наступну покупку", "rewardValue": 20.0},
+            },
+        }
+    )
+
+    exit_code = main(["coupons"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "за купівлю вершкового масла" in out
+    assert "2026-08-01" in out and "2026-08-31" in out
+    assert "-20% на наступну покупку" in out
+
+
+def test_coupons_command_with_no_active_coupons_prints_clean_message(capsys):
+    client = FakeClient({"silpo_get_my_coupons": {"success": True, "summary": "Found 0 coupons", "coupons": []}})
+
+    exit_code = main(["coupons"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no active coupons" in out.lower()
+    assert all(call[0] != "silpo_get_coupon_details" for call in client.calls)
