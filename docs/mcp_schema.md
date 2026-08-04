@@ -231,3 +231,49 @@ top of the assumptions above:
   PRD's "before adding anything, reads the current cart" ordering), then the
   budget trim, then the add call — so a declined guard prompt aborts before
   any budget trimming happens.
+
+## Assumptions made in issue #7 (promo optimization, `--optimize promos`)
+
+Still no live-verified schema at implementation time. `silpo_agent/promo_optimizer.py`
+is a new, wholly opt-in module — `cli.py` only imports/calls it when
+`--optimize promos` is passed, so these two tool names are never referenced
+in a plain `reorder` run:
+
+- **Promo-equivalent lookup tool/shape**: no tool name is given anywhere in
+  the PRD, CONTEXT.md, or the issue text for the "swap for a cheaper promo
+  equivalent" half of promo optimization — only the behavior is specified.
+  Assumed a tool named `silpo_get_promo_equivalent` taking
+  `{"product_id": "<id>"}` and returning either a falsy value (no promo
+  equivalent exists) or a single dict `{"product_id": ..., "price": ...}`.
+  Unlike `silpo_get_replacements` (Substitution Resolver, issue #5), this is
+  never a user-facing choice among multiple candidates — the PRD describes
+  promo swap as an automatic optimization, not a decision needing input — so
+  no list-of-candidates normalization is implemented; a list response would
+  need revisiting once the real shape is confirmed. The swap only applies
+  when the returned price is strictly lower than the item's current
+  `last_known_price`; an equal-or-higher price is treated the same as no
+  equivalent.
+- **Bonuses/promo-codes listing tool/shape**: also not named in the PRD or
+  issue text beyond "apply available loyalty bonuses/promo codes." Assumed a
+  tool named `silpo_get_available_bonuses` taking no arguments and returning
+  a list of dicts shaped like `{"id": ...}` (a bare id string in the list is
+  also accepted, same defensive normalization style as elsewhere in this
+  codebase). An empty/absent list means nothing to apply, and
+  `silpo_update_shopping_cart` is not called at all in that case — mirrors
+  the Cart Writer's "no items to add, no call" pattern from issue #6.
+- **`silpo_update_shopping_cart` request shape**: assumed to accept
+  `{"bonus_ids": [...]}` and apply to the cart as a whole (not per-item),
+  per the PRD's Promo Optimizer wording ("apply available loyalty
+  bonuses/promo codes to the cart as a whole"). This is the ticket's least
+  confirmed assumption alongside the promo-equivalent lookup tool name —
+  revisit both first once `tools/list` is inspected live.
+- **Pipeline placement**: `cli.py` calls `optimize_promos` on the
+  Substitution Resolver's `.items` output, and its (possibly promo-swapped)
+  items feed `write_cart`, per the PRD order Address Resolver -> Order
+  Aggregator -> Substitution Resolver -> (optional) Promo Optimizer -> Cart
+  Writer. Promo swap / bonus-applied report lines are printed after the
+  substitution/unavailable lines, before the trim/added lines.
+- **Flag shape**: `--optimize promos` is an `argparse` `choices=["promos"]`
+  option (not a bare boolean flag), per the PRD's Promo Optimizer section
+  and issue title exactly as written — `--optimize` with no value or an
+  unrecognized value is rejected by argparse rather than silently ignored.

@@ -290,3 +290,88 @@ def test_reorder_aborts_before_search_when_address_not_resolved(capsys, monkeypa
     assert all(call[0] != "silpo_get_my_online_orders" for call in client.calls)
     assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
     assert log_store.read_history() == []
+
+
+_PROMO_TOOLS = {"silpo_get_promo_equivalent", "silpo_get_available_bonuses", "silpo_update_shopping_cart"}
+
+
+def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, monkeypatch, tmp_path):
+    """Flag-off must be a true no-op for promo optimization (CONTEXT.md's
+    "Promo optimization" entry / issue #7 acceptance criteria) -- no
+    promo-equivalent lookup, no bonus lookup, no cart-wide update call.
+    """
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": True},
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert all(call[0] not in _PROMO_TOOLS for call in client.calls)
+    assert "Promo swap" not in out
+    assert "bonus" not in out.lower()
+    assert (
+        "silpo_add_or_update_cart_products",
+        {"items": [{"product_id": "milk", "quantity": 1}]},
+    ) in client.calls
+
+
+def test_reorder_optimize_promos_swaps_item_and_applies_bonuses(capsys, monkeypatch, tmp_path):
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": True},
+            "silpo_get_promo_equivalent": {"product_id": "milk-promo", "price": 40.0},
+            "silpo_get_available_bonuses": [{"id": "bonus-1"}],
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(
+        ["reorder", "--last", "1", "--threshold", "1.0", "--optimize", "promos"],
+        client=client,
+        log_store=log_store,
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Promo swap: milk -> milk-promo" in out
+    assert "bonus-1" in out
+    assert "Total: 40.00" in out
+    assert (
+        "silpo_add_or_update_cart_products",
+        {"items": [{"product_id": "milk-promo", "quantity": 1}]},
+    ) in client.calls
+    assert ("silpo_update_shopping_cart", {"bonus_ids": ["bonus-1"]}) in client.calls
+    # Promo Optimizer runs between Substitution Resolver and Cart Writer.
+    tool_order = [tool for tool, _ in client.calls]
+    assert tool_order.index("silpo_check_availability") < tool_order.index("silpo_get_promo_equivalent")
+    assert tool_order.index("silpo_get_promo_equivalent") < tool_order.index("silpo_add_or_update_cart_products")
+
+
+def test_reorder_optimize_invalid_choice_rejected(capsys, monkeypatch, tmp_path):
+    client = FakeClient({})
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    try:
+        main(["reorder", "--last", "1", "--threshold", "1.0", "--optimize", "bogus"], client=client, log_store=log_store)
+        raised = False
+    except SystemExit:
+        raised = True
+
+    assert raised
