@@ -57,6 +57,281 @@ fixed in this note:
   PRD calls out as the reason address resolution runs before product search
   — is not actually happening correctly today for the new-address path.
 
+## Live-verified: all remaining tools (2026-08-04)
+
+Full sweep of the Silpo MCP server's 39 `silpo_*` tools, via the same
+authenticated connection as the address-tools sweep above (the MCP server
+only responds to an authorized user — every call below required a real,
+logged-in Silpo account). Read-only tools were called directly and their
+real response shapes captured below. **Mutating tools were NOT called**
+(they would have changed the real, connected Silpo account's cart,
+certificates, or favorites) — their schemas below come from the tool
+definitions themselves (still ground truth, just unexercised).
+
+This sweep invalidates several assumptions across almost every module, not
+just Address Resolver. Summarized first, details below:
+
+- **Cart Writer's core assumption is wrong**: `silpo_get_my_shopping_cart`
+  does NOT return cart contents — it returns only a `shoppingCartId`. Actual
+  cart contents (items, branch, delivery type, timeslot, totals, validation
+  errors) come from a second call, `silpo_get_shopping_cart_by_id`.
+- **Order Aggregator's field names are wrong**: an order's line items are
+  under `"products"`, not `"items"`; each item's id field is `"id"`, not
+  `"product_id"`. Also confirms newest-first ordering (already assumed
+  correctly).
+- **`silpo_add_or_update_cart_products`'s payload is far more specific**
+  than assumed: each product needs `productId` + `companyId` + `branchId` +
+  `quantity`, plus a `shoppingCartId` — not just `product_id`/`quantity`.
+- **Substitution Resolver's `silpo_check_availability` tool doesn't
+  exist.** Availability is a field (`stock`, `available`) on product records
+  returned by `silpo_get_products` / `silpo_find_products_batch` /
+  `silpo_get_similar_products` / `silpo_get_product_details` — there's no
+  standalone availability-check call.
+- **Promo Optimizer's two invented tools don't exist.** There's no
+  per-product "cheaper promo equivalent" lookup and no separate
+  "apply bonuses" call. Real promo/bonus handling is structurally different
+  — see the Promo/loyalty tools section below.
+
+### Cart tools
+
+- **`silpo_get_my_shopping_cart`** — no args. Real response:
+  `{"success": true, "shoppingCartId": "<uuid>"}`. Nothing else. Must be
+  followed by `silpo_get_shopping_cart_by_id` for actual contents.
+- **`silpo_get_shopping_cart_by_id({"shoppingCartId": "..."})`** — real
+  response (trimmed):
+  ```json
+  {"success": true, "cart": {
+    "id": "uuid", "deliveryType": "DeliveryHome",
+    "timeslot": {"start": "...", "end": "..."},
+    "address": {"addressType": "flat", "latitude": "49.x", "longitude": "28.x",
+      "city": "...", "street": "...", "house": "...", "flat": "...", "...": "..."},
+    "shipments": [{"id": "uuid", "companyId": "uuid", "branchId": "uuid",
+      "products": [{"productId": "uuid", "companyId": "uuid", "branchId": "uuid",
+        "slug": "...", "name": "...", "quantity": 2, "price": 49.9,
+        "oldPrice": 69.9, "subTotal": 139.8, "subDiscount": 40, "total": 99.8,
+        "stock": 0, "weighted": false, "addToBasketStep": 1, "comment": null}]}],
+    "certificates": [], "isAdultConfirmed": false, "promoCode": null,
+    "calculation": {"total": 166.7, "totalAfterDiscounts": 166.7,
+      "certificatesTotal": 0, "subTotal": 228.29, "subDiscount": 61.59,
+      "productsTotal": 166.7,
+      "delivery": {"total": 0, "totalWeight": 2.67, "deliveryExpressByPromise": {...}},
+      "payment": {"availableTypes": [...]},
+      "validations": [
+        {"level": "error", "type": "timeslot", "message": "timeslot.not_found", "context": []},
+        {"level": "error", "type": "product", "message": "product.offer.stock.max",
+         "context": {"productId": "uuid", "stock": 0}}
+      ]}},
+   "loyalty": {"bonusAvailable": 24.27, "bonusTotal": 24.27, "bonusRequested": null, "isEnabled": true}}
+  ```
+  Key points for Cart Writer: use `cart.shipments[0].branchId` +
+  `cart.deliveryType` + `cart.timeslot` as the search context (this is the
+  authoritative source the PRD/Address Resolver ticket was trying to
+  approximate). `cart.calculation.validations[]` reports real problems
+  (out-of-stock items, stale timeslots) — worth surfacing to the user rather
+  than only trusting a bare item list. `cart.calculation.totalAfterDiscounts`
+  is what the user actually pays; `total` is pre-discount.
+- **`silpo_add_or_update_cart_products`** (mutating, not called) — real
+  request: `{"shoppingCartId": "...", "products": [{"productId": "...",
+  "companyId": "...", "branchId": "...", "quantity": N, "addQuantity": bool,
+  "comment": "..."}]}`. `companyId`/`branchId` must come from a product
+  search result (or the existing cart/order), not invented — every product
+  record everywhere in this API carries its own `companyId`/`branchId`.
+  Quantity for weighted goods must be a multiple of the product's
+  `addToBasketStep` (e.g. 0.35 step seen on cucumbers). Tool description
+  also says: always ignore/skip plastic bags in cart writes, and always
+  verify via `silpo_get_shopping_cart_by_id` afterward.
+- **`silpo_remove_cart_products`** (mutating, not called) — `{"shoppingCartId",
+  "products": [{"productId": "..."}]}`.
+- **`silpo_clear_shopping_cart`** (mutating, destructive, not called) —
+  `{"shoppingCartId"}` only.
+- **`silpo_update_shopping_cart`** (mutating, not called) — the real
+  "apply bonuses/promo code" mechanism: `bonusRequested` (number of
+  Балабонуси to apply, or `null` to remove) and `promoCode` (string or
+  `null`) are just two more fields on this single cart-update call, alongside
+  `deliveryType`/`timeslot`/`address`/`shipments` (which per the tool's own
+  description must be copied from `silpo_get_shopping_cart_by_id`'s
+  response, not constructed). There is no separate "apply bonuses" tool —
+  Promo Optimizer's assumed `silpo_get_available_bonuses` +
+  `silpo_update_shopping_cart({"bonus_ids": [...]})` design doesn't match
+  reality on either count.
+- **`silpo_add_or_update_certificates`** (mutating, not called) —
+  `{"shoppingCartId", "certificatesToAdd": [{"barcode", "pincode"}],
+  "certificatesToRemove": [{"barcode", "pincode"}]}`, max 10 each.
+
+### Order history tools
+
+- **`silpo_get_my_online_orders({"limit", "offset"})`** — real response:
+  `{"success": true, "summary": "Found N orders (total: T)", "orders": [
+  {"orderId": "uuid", "number": "...", "status": "received", "createdAt":
+  "ISO", "amount": 2077.38, "discount": 486.88, "delivery": {"type":
+  "DeliveryHome", "timeSlot": {"from", "to"}, "deliveredAt": "ISO"},
+  "address": {"city", "street", "building", "apartment"}, "products": [
+  {"id": "uuid", "name": "...", "price": 66.9, "quantity": 1, "subtotal":
+  66.9, "removed": false, "image": "...", "companyId": "uuid", "branchId":
+  "uuid"}]}], "meta": {"limit", "offset", "total"}}`.
+  **Confirms newest-first ordering** (already assumed correctly by
+  `order_aggregator.py`) — three fetched orders came back
+  2026-07-20 → 2026-07-03 → 2026-06-24, descending. **Wrong field names in
+  current code**: the line-item list is `"products"`, not `"items"`; each
+  item's id field is `"id"`, not `"product_id"`. Items carry a `"removed"`
+  boolean — a product can appear with `"removed": true` (e.g. a tomato
+  removed from the order after ordering but before delivery, still listed
+  with its original price/subtotal) — `derive_typical_items` should
+  probably skip `removed: true` line items when counting frequency, which it
+  currently can't do since it doesn't know this field exists. No explicit
+  "paid"/"confirmed" field on the order — `status: "received"` is the closest
+  signal; the PRD's assumption that this endpoint already filters to
+  confirmed/paid orders is unconfirmed either way. `quantity` can be
+  fractional for weighted goods (e.g. `1.232` kg of nectarines).
+- **`silpo_get_my_offline_orders({"branchId", "deliveryType",
+  "timeslotStart", "timeslotEnd", "dateStart", "dateEnd", "limit" (max 10),
+  "offset"})`** — in-store purchase history, separate from online orders and
+  explicitly out of this project's v1 scope, but now schema-documented for
+  completeness: each order has `filId`, `filialName`, `cityName`,
+  `createdAt`, `sumReg`, `accruedBalaBonusesSum`, `sumDiscount`,
+  `receiptUrl`, `chequeMagicName`, `rewards[]`, and `products[]` where each
+  product has `lagerId`, `name`, `unit`, `quantity`, `price`, `image`, and a
+  nested `catalogProduct` (null if the product can no longer be matched to
+  the catalog) with `id`/`slug`/`price`/`stock`/`available`/`companyId`/
+  `branchId` — `catalogProduct !== null` means it's reorderable via
+  `silpo_add_or_update_cart_products`.
+
+### Product search / replacement tools
+
+- **`silpo_get_replacements({"branchId", "companyId", "productIds": [...],
+  "deliveryType"})`** — confirmed as a **batch** call (multiple product ids
+  at once), requiring `companyId`/`branchId`/`deliveryType` context — not
+  the single-`product_id` shape `substitution_resolver.py` currently
+  assumes. Real response shape: `{"success": true, "summary": "Found
+  replacements for N products", "items": [...]}`. Tested live against two
+  genuinely out-of-stock cart items and got `"Found replacements for 0
+  products"` (empty `items`) — so the populated-item shape is still
+  unconfirmed; worth retesting against a product with known replacements
+  before relying on field names inside `items[]`.
+- **Product record shape** (same shape returned by `silpo_get_products`,
+  `silpo_find_products_batch`, and `silpo_get_similar_products` — this is
+  the shape Substitution Resolver and Promo Optimizer should both consume):
+  `{"id", "name", "slug", "price", "oldPrice", "stock", "available",
+  "image", "weighted", "step", "specialPrices", "companyId", "branchId",
+  "externalProductId"}`. `available` (bool) + `stock` (int) together are the
+  real availability signal — confirms no standalone
+  `silpo_check_availability` tool exists; this is what Substitution
+  Resolver's availability check should read instead.
+- **`silpo_find_products_batch({"branchId", "deliveryType",
+  "timeslotStart", "timeslotEnd", "products": [...], "limit"})`** — real
+  response: `{"success": true, "summary": "...", "queries": [{"query": "...",
+  "totalFound": N, "products": [...]}], "meta": {"totalQueries",
+  "totalProducts"}}` — grouped per input query string, not a flat list.
+- **`silpo_get_products({"branchId", "deliveryType", "timeslotStart",
+  "timeslotEnd", "category"|"mustHavePromotion"|"promotionCode"|"set", ...})`**
+  — requires at least one of the four filters; `timeslotStart`/`timeslotEnd`
+  are hard-required by the schema (a call without them errors immediately —
+  confirmed live). This is the closest thing to a "promo equivalent"
+  browser: `mustHavePromotion: true` (optionally + `promotionCode` from
+  `silpo_get_promotions`) returns promotional products, but there is no
+  per-product "find the promo version of THIS product" call — a real Promo
+  Optimizer would need to search by category/name and match, not do a
+  single lookup.
+- **`silpo_get_product_details({"branchId", "slug", "deliveryType",
+  "timeslotStart", "timeslotEnd"})`** — real response: `{"success": true,
+  "product": {"id", "name", "slug", "price", "oldPrice", "stock",
+  "available", "weighted", "step", "ratio", "url", "images": [...],
+  "attributes": {"<label>": "<value>", ...}, "companyId", "branchId"}}`.
+  `slug` must come from a prior search result, never guessed from a name.
+- **`silpo_get_similar_products({"branchId", "slug", "deliveryType",
+  "limit", "offset"})`** — same product-record shape as above, wrapped in
+  `{"success", "summary", "products": [...], "meta": {"total"}}`. A
+  plausible real replacement-candidate source for Substitution Resolver if
+  `silpo_get_replacements` turns out thin in practice.
+
+### Promo / loyalty tools
+
+None of these match the tool names `promo_optimizer.py` invented
+(`silpo_get_promo_equivalent`, `silpo_get_available_bonuses`) — real promo
+handling is spread across several tools with a different shape:
+
+- **`silpo_get_promotions({"branchId", "deliveryType", "timeslotStart",
+  "timeslotEnd"})`** — branch-wide promotion *categories*, not per-product:
+  `{"success", "summary", "promotions": [{"code", "title", "productCount",
+  "url"}]}`. `code` feeds `silpo_get_products(promotionCode=...)`.
+- **`silpo_get_my_promos()`** — personal "select which frequency-promos to
+  activate" offers (not directly related to a specific cart item):
+  `{"success", "summary", "promos": [{"promoId", "selected", "beginDate",
+  "endDate", "description", "rewardText", "rewardValue", "limitText",
+  "warningText", "addressListText", "image"}], "meta": {"total", "minSelect",
+  "maxSelect"}}`. No tool in this MCP server's 39 tools writes/activates a
+  promo selection — this may be app-only, or an omission; unconfirmed.
+- **`silpo_get_promo_codes()`** — user's own promo codes (empty for this
+  account): `{"success", "summary", "promoCodes": [], "meta": {"total"}}`.
+- **`silpo_get_my_coupons()`** — `{"success", "summary", "coupons": [{"id",
+  "active", "useWay", "beginDate", "endDate", "description", "limitText",
+  "warningText", "image"}]}`. `silpo_get_coupon_details({"businessCouponId"})`
+  takes `coupons[].id`.
+- **`silpo_get_my_certificates({"limit", "offset"})`** — `{"success",
+  "summary", "certificates": [{"id", "createdAt", "totalPrice", "barcode",
+  "pincode", "expireDate", "title", "image"}]}`.
+- **`silpo_get_loyalty_info()`** — `{"success", "loyalty": {"card":
+  {"barcode", "typeName", "memberId"}, "balance": {"total", "currency",
+  "accounts": [{"type", "amount"}]}}}`. `balance.total` is the same value as
+  `bonusAvailable` seen on the cart response.
+
+None of these are wired into `promo_optimizer.py` today — issue #7's module
+needs a real redesign, not a field-name patch, once this becomes a live
+follow-up ticket.
+
+### Profile / account tools (not used by the `reorder` pipeline, documented for completeness)
+
+- **`silpo_get_my_profile()`** — `{"success", "profile": {"id", "firstName",
+  "lastName", "middleName", "phone", "email", "birthday", "gender",
+  "status"}}`.
+- **`silpo_get_my_family()`** — `{"success", "summary", "name", "members":
+  [{"profileId", "name", "phone", "image", "profileCreatedAt", "itsMe"}],
+  "children": [{"id", "name", "slug", "dateOfBirth"}], "pets": [{"id",
+  "name", "slug"}]}`.
+- **`silpo_get_my_favorites({"branchId", "deliveryType", "timeslotStart",
+  "limit", "offset"})`** (not called live — needs the same branch/timeslot
+  context as product search) — per its tool description, returns products
+  in the same shape as `silpo_get_products`.
+- **`silpo_add_or_update_favorite_products`** (mutating, not called) —
+  `{"actions": [{"productId", "externalProductId", "toDelete"}]}`, max 5.
+- **`silpo_get_my_food_restrictions()`** — `{"success", "summary",
+  "restrictions": []}` (empty for this account).
+- **`silpo_get_my_premium_subscription()`** — when inactive: `{"success",
+  "summary", "webLink", "mobileLink"}`; per the tool description, an active
+  subscription instead returns share links (`shareWebLink`/`shareMobileLink`)
+  — not verified live (this account has no active subscription).
+
+### Location / branch / delivery tools
+
+- **`silpo_list_branches({"hasPickup", "hasNP", "limit", "offset"})`** —
+  response too large to fully inspect in one call (121K+ chars for the
+  default page), but its top-level schema is confirmed: `{"success",
+  "summary", "branches": [...], "meta": {"limit", "offset", "total"}}`.
+- **`silpo_get_time_slots({"branchId", "deliveryTypes", "start", "end",
+  "limit"})`** — `{"success", "summary", "slots": [{"start", "end",
+  "available", "deliveryType", "deliveryCost", "deliveryCostMap": [{"cost",
+  "fromOrderCost"}], "minOrderCost", "maxWeight", "constraints": {...},
+  "fast"}], "meta": {"total"}}`. All times UTC. Live-tested: this account's
+  current cart timeslot (`2026-08-04T07:00–08:30`) came back
+  `"available": false` alongside two other slots — matches the
+  `"timeslot.not_found"` validation error seen on
+  `silpo_get_shopping_cart_by_id` above; a real Cart Writer should probably
+  check this before adding items, not just before/after.
+- **`silpo_get_categories_tree`** / **`silpo_get_categories`** /
+  **`silpo_get_category`** / **`silpo_get_popular_categories`** /
+  **`silpo_get_product_sets`** — category/browse tools, not currently used
+  by any module in this project. `silpo_get_popular_categories` and
+  `silpo_get_product_sets` response shapes confirmed live:
+  `{"success", "summary", "categories": [{"id", "slug", "title", "url"}]}`
+  and `{"success", "summary", "sets": [{"slug", "title", "description",
+  "link"}]}` respectively. `silpo_get_categories_tree`'s top-level schema is
+  `{"success", "summary", "tree": [...]}` (full tree too large to inspect in
+  one call).
+- **`silpo_find_nova_poshta_settlements`** / **`silpo_find_nova_poshta_offices`**
+  — not called live; out of scope for this project (v1 only handles
+  `DeliveryHome`/saved-address delivery, no Nova Poshta flow). Param shapes
+  only, from the tool definitions.
+
 ## Original status note (superseded above for address tools)
 
 Status as of the original foundations ticket: **auth endpoints verified
