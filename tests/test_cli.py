@@ -55,6 +55,49 @@ def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
     assert ("silpo_get_available_delivery_types", {"latitude": 50.45, "longitude": 30.52}) in client.calls
 
 
+def test_reorder_resolves_cart_context_between_address_resolver_and_order_aggregator(capsys, monkeypatch, tmp_path):
+    """Cart Context Resolver (issue #17) runs right after Address Resolver
+    and before Order Aggregator, since branch/delivery/timeslot context is a
+    dependency for tools used by later tickets. Non-empty
+    cart.calculation.validations must be surfaced to the user."""
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
+            ],
+            "silpo_check_availability": {"available": True},
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": {
+                "success": True,
+                "cart": {
+                    "deliveryType": "DeliveryHome",
+                    "timeslot": {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"},
+                    "shipments": [{"companyId": "c1", "branchId": "b1", "products": []}],
+                    "calculation": {
+                        "validations": [
+                            {"level": "error", "type": "timeslot", "message": "timeslot.not_found", "context": []},
+                        ]
+                    },
+                },
+            },
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "timeslot.not_found" in out
+    tool_order = [tool for tool, _ in client.calls]
+    assert tool_order.index("silpo_get_my_delivery_addresses") < tool_order.index("silpo_get_my_shopping_cart")
+    assert tool_order.index("silpo_get_shopping_cart_by_id") < tool_order.index("silpo_get_my_online_orders")
+    assert ("silpo_get_shopping_cart_by_id", {"shoppingCartId": "cart-1"}) in client.calls
+
+
 def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart_writer(monkeypatch, tmp_path):
     orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
     client = FakeClient(
