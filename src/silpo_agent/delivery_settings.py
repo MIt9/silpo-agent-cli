@@ -172,6 +172,9 @@ def run_delivery_settings(client, log_store, *, input_fn=None, print_fn=None):
     chosen_slot = _pick_timeslot(client, chosen_type["branchId"], input_fn, print_fn)
     if chosen_slot is None:
         return DeliveryResult(applied=False)
+    if not chosen_slot.get("start") or not chosen_slot.get("end"):
+        print_fn("delivery: chosen timeslot is missing start/end; aborting.")
+        return DeliveryResult(applied=False)
 
     address = dict(cart_context.address)
     address["latitude"] = str(resolved_address.latitude)

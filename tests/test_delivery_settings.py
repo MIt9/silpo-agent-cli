@@ -187,6 +187,25 @@ def test_invalid_timeslot_choice_does_not_apply():
     result = run_delivery_settings(client, log_store, input_fn=input_fn, print_fn=lambda *a: None)
 
     assert result.applied is False
+
+
+def test_timeslot_missing_start_or_end_does_not_apply():
+    """A malformed silpo_get_time_slots entry (available=true but no real
+    start/end) must not reach silpo_update_shopping_cart -- same
+    abort-cleanly guard as every other invalid-selection case."""
+    responses = _base_responses(
+        silpo_get_time_slots=time_slots_response(
+            {"start": None, "end": None, "available": True},
+        )
+    )
+    client = FakeClient(responses)
+    log_store = FakeLogStore()
+    input_fn = make_input("y", "1", "1")
+
+    result = run_delivery_settings(client, log_store, input_fn=input_fn, print_fn=lambda *a: None)
+
+    assert result.applied is False
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
     assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
 
 
