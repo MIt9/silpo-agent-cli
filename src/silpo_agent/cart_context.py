@@ -39,6 +39,16 @@ class CartContext:
     timeslot_end: str | None
     validations: list[dict] = field(default_factory=list)
     products: list[dict] = field(default_factory=list)
+    # Raw fields below exist only so promo_optimizer.py (#20) can call
+    # silpo_update_shopping_cart, whose own tool description requires
+    # shipments/address/timeslot/deliveryType to be copied verbatim from
+    # silpo_get_shopping_cart_by_id's response, not reconstructed.
+    # bonus_available mirrors the response's top-level "loyalty.bonusAvailable"
+    # (same value the cart's "loyalty" node reports, per docs/mcp_schema.md).
+    bonus_available: float | None = None
+    timeslot: dict | None = None
+    address: dict | None = None
+    shipments: list[dict] = field(default_factory=list)
 
 
 def _empty_context(shopping_cart_id: str | None = None) -> CartContext:
@@ -64,6 +74,7 @@ def resolve_cart_context(client, *, print_fn=None) -> CartContext:
 
     response = client.call("silpo_get_shopping_cart_by_id", {"shoppingCartId": shopping_cart_id}) or {}
     cart = response.get("cart") or {}
+    loyalty = response.get("loyalty") or {}
 
     shipments = cart.get("shipments") or []
     shipment = shipments[0] if shipments else {}
@@ -82,4 +93,8 @@ def resolve_cart_context(client, *, print_fn=None) -> CartContext:
         timeslot_end=timeslot.get("end"),
         validations=validations,
         products=shipment.get("products") or [],
+        bonus_available=loyalty.get("bonusAvailable"),
+        timeslot=cart.get("timeslot"),
+        address=cart.get("address"),
+        shipments=shipments,
     )

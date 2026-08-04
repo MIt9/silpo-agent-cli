@@ -33,7 +33,7 @@ def test_resolves_full_cart_context():
     client = FakeClient(
         {
             "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
-            "silpo_get_shopping_cart_by_id": cart_response(full_cart()),
+            "silpo_get_shopping_cart_by_id": cart_response(full_cart(), loyalty={"bonusAvailable": 24.27}),
         }
     )
 
@@ -48,6 +48,12 @@ def test_resolves_full_cart_context():
     assert context.validations == []
     assert context.products == []
     assert ("silpo_get_shopping_cart_by_id", {"shoppingCartId": "cart-1"}) in client.calls
+    # Raw fields needed by promo_optimizer.py's silpo_update_shopping_cart call
+    # (issue #20) -- must be carried through as-is, not reconstructed.
+    assert context.bonus_available == 24.27
+    assert context.timeslot == {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"}
+    assert context.address is None
+    assert context.shipments == full_cart()["shipments"]
 
 
 def test_resolves_non_empty_cart_products_for_cart_writer_guard():
@@ -92,6 +98,10 @@ def test_empty_fresh_cart_has_no_shipment_context():
     assert context.timeslot_end is None
     assert context.validations == []
     assert context.products == []
+    assert context.bonus_available is None
+    assert context.timeslot is None
+    assert context.address is None
+    assert context.shipments == []
 
 
 def test_validations_are_surfaced_via_print_fn_but_do_not_block():
