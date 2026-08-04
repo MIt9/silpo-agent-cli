@@ -134,6 +134,72 @@ def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
     assert ("silpo_get_available_delivery_types", {"latitude": 50.45, "longitude": 30.52}) in client.calls
 
 
+def test_reorder_no_shipments_cart_reuses_address_without_second_prompt(capsys, monkeypatch, tmp_path):
+    """Issue #29: Cart Context Resolver's no-shipments address fallback must
+    NOT prompt the user a second time in reorder's pipeline -- it already
+    resolved an address itself via Address Resolver before Cart Context
+    Resolver even runs. This also proves the fallback's real branch/company
+    context reaches the final add-to-cart call (order items below carry no
+    companyId/branchId of their own, so only the fallback context can supply
+    them)."""
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
+            ],
+            "silpo_get_available_delivery_types": {
+                "success": True,
+                "branchId": "fallback-b1",
+                "companyId": "fallback-c1",
+                "deliveryTypes": [{"type": "DeliveryHome", "branchId": "fallback-b1", "companyId": "fallback-c1"}],
+            },
+            "silpo_find_products_batch": _available_batch("milk"),
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-2"},
+            "silpo_get_shopping_cart_by_id": {
+                "success": True,
+                "cart": {"deliveryType": None, "timeslot": None, "shipments": [], "calculation": {"validations": []}},
+                "loyalty": {},
+            },
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    input_calls = []
+
+    def fake_input(prompt=""):
+        input_calls.append(prompt)
+        return "y"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    assert exit_code == 0
+    # Only ONE address-confirmation prompt across the whole run.
+    assert sum(1 for prompt in input_calls if "Deliver to" in prompt) == 1
+    assert client.calls.count(("silpo_get_my_delivery_addresses", None)) == 1
+    # The fallback reused the delivery-types lookup silpo_get_my_delivery_addresses's
+    # own call already made, rather than issuing a duplicate.
+    assert client.calls.count(("silpo_get_available_delivery_types", {"latitude": 50.45, "longitude": 30.52})) == 1
+    assert (
+        "silpo_add_or_update_cart_products",
+        {
+            "shoppingCartId": "cart-2",
+            "products": [
+                {
+                    "productId": "milk",
+                    "companyId": "fallback-c1",
+                    "branchId": "fallback-b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+            ],
+        },
+    ) in client.calls
+
+
 def test_reorder_resolves_cart_context_between_address_resolver_and_order_aggregator(capsys, monkeypatch, tmp_path):
     """Cart Context Resolver (issue #17) runs right after Address Resolver
     and before Order Aggregator, since branch/delivery/timeslot context is a
