@@ -1,6 +1,11 @@
+import socket
 import time
 
-from silpo_agent.auth import MCPClient, TokenStore
+import keyring.errors
+import pytest
+
+from silpo_agent import auth
+from silpo_agent.auth import MCPClient, MCPError, TokenStore
 
 
 class FakeTokenStore:
@@ -130,3 +135,90 @@ def test_token_store_load_returns_none_for_corrupt_value(monkeypatch):
     store = TokenStore(service="test-service", username="test-user")
 
     assert store.load() is None
+
+
+def test_expired_token_with_no_refresh_token_falls_back_to_login():
+    # RFC 6749: refresh_token is optional in a token response. If the server
+    # never gave us one, refreshing isn't possible - must re-login instead.
+    expired_no_refresh = {"access_token": "old-token", "refresh_token": None, "expires_at": 1000.0}
+    token_store = FakeTokenStore(expired_no_refresh)
+    fresh_token = {"access_token": "relogged-in-token", "refresh_token": "r1", "expires_at": 9999999999.0}
+
+    def fake_login():
+        return fresh_token
+
+    used_tokens = []
+
+    def fake_call_tool_http(server_url, tool, args, access_token):
+        used_tokens.append(access_token)
+        return {"ok": True}
+
+    client = MCPClient(
+        token_store=token_store,
+        call_tool_http=fake_call_tool_http,
+        login=fake_login,
+        refresh=fail_refresh,
+        now=lambda: 2000.0,
+    )
+
+    client.call("silpo_get_my_shopping_cart", {})
+
+    assert used_tokens == ["relogged-in-token"]
+    assert token_store.load() == fresh_token
+
+
+def test_token_store_load_raises_mcp_error_when_keyring_unavailable(monkeypatch):
+    def broken_get_password(service, username):
+        raise keyring.errors.KeyringLocked("keyring is locked")
+
+    monkeypatch.setattr("silpo_agent.auth.keyring.get_password", broken_get_password)
+
+    store = TokenStore(service="test-service", username="test-user")
+
+    with pytest.raises(MCPError):
+        store.load()
+
+
+def test_token_store_save_raises_mcp_error_when_keyring_unavailable(monkeypatch):
+    def broken_set_password(service, username, value):
+        raise keyring.errors.PasswordSetError("no backend available")
+
+    monkeypatch.setattr("silpo_agent.auth.keyring.set_password", broken_set_password)
+
+    store = TokenStore(service="test-service", username="test-user")
+
+    with pytest.raises(MCPError):
+        store.save({"access_token": "a", "refresh_token": "r", "expires_at": 0.0})
+
+
+def test_bind_redirect_server_falls_back_to_next_free_port(monkeypatch):
+    occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    occupied.bind(("127.0.0.1", 0))
+    occupied.listen(1)
+    taken_port = occupied.getsockname()[1]
+
+    monkeypatch.setattr(auth, "REDIRECT_PORTS", range(taken_port, taken_port + 2))
+
+    try:
+        httpd = auth._bind_redirect_server()
+        try:
+            assert httpd.server_address[1] != taken_port
+        finally:
+            httpd.server_close()
+    finally:
+        occupied.close()
+
+
+def test_bind_redirect_server_raises_auth_error_when_all_ports_taken(monkeypatch):
+    occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    occupied.bind(("127.0.0.1", 0))
+    occupied.listen(1)
+    taken_port = occupied.getsockname()[1]
+
+    monkeypatch.setattr(auth, "REDIRECT_PORTS", range(taken_port, taken_port + 1))
+
+    try:
+        with pytest.raises(auth.AuthError):
+            auth._bind_redirect_server()
+    finally:
+        occupied.close()

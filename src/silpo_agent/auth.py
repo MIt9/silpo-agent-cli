@@ -26,8 +26,7 @@ SERVER_URL = "https://mcp.silpo.ua/mcp"
 AUTHORIZE_URL = "https://mcp.silpo.ua/authorize"
 TOKEN_URL = "https://mcp.silpo.ua/token"
 REGISTER_URL = "https://mcp.silpo.ua/register"
-REDIRECT_PORT = 8765
-REDIRECT_URI = f"http://127.0.0.1:{REDIRECT_PORT}/callback"
+REDIRECT_PORTS = range(8765, 8771)
 
 KEYRING_SERVICE = "silpo-agent"
 KEYRING_USERNAME = "mcp-token"
@@ -51,7 +50,10 @@ class TokenStore:
         self.username = username
 
     def load(self) -> dict | None:
-        raw = keyring.get_password(self.service, self.username)
+        try:
+            raw = keyring.get_password(self.service, self.username)
+        except keyring.errors.KeyringError as exc:
+            raise MCPError(f"OS keyring unavailable: {exc}") from exc
         if not raw:
             return None
         try:
@@ -60,7 +62,10 @@ class TokenStore:
             return None
 
     def save(self, token: dict) -> None:
-        keyring.set_password(self.service, self.username, json.dumps(token))
+        try:
+            keyring.set_password(self.service, self.username, json.dumps(token))
+        except keyring.errors.KeyringError as exc:
+            raise MCPError(f"OS keyring unavailable: {exc}") from exc
 
 
 def _post_json(url: str, payload: dict, headers: dict | None = None) -> dict:
@@ -100,11 +105,11 @@ def _token_from_response(resp: dict) -> dict:
     }
 
 
-def _register_client() -> str:
+def _register_client(redirect_uri: str) -> str:
     resp = _post_json(
         REGISTER_URL,
         {
-            "redirect_uris": [REDIRECT_URI],
+            "redirect_uris": [redirect_uri],
             "token_endpoint_auth_method": "none",
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -130,8 +135,20 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         pass
 
 
-def _wait_for_redirect() -> str:
-    httpd = HTTPServer(("127.0.0.1", REDIRECT_PORT), _CallbackHandler)
+def _bind_redirect_server() -> HTTPServer:
+    last_error = None
+    for port in REDIRECT_PORTS:
+        try:
+            return HTTPServer(("127.0.0.1", port), _CallbackHandler)
+        except OSError as exc:
+            last_error = exc
+    raise AuthError(
+        f"could not bind an OAuth redirect listener on any of ports "
+        f"{REDIRECT_PORTS.start}-{REDIRECT_PORTS.stop - 1} (all in use?): {last_error}"
+    )
+
+
+def _wait_for_redirect(httpd: HTTPServer) -> str:
     httpd.auth_code = None
     httpd.auth_error = None
     httpd.handle_request()
@@ -144,28 +161,33 @@ def pkce_browser_login() -> dict:
     """Full OAuth2.1+PKCE flow: dynamic client registration, browser
     authorize, local redirect capture, code-for-token exchange.
     """
-    client_id = _register_client()
-    verifier = secrets.token_urlsafe(64)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    httpd = _bind_redirect_server()
+    redirect_uri = f"http://127.0.0.1:{httpd.server_address[1]}/callback"
+    try:
+        client_id = _register_client(redirect_uri)
+        verifier = secrets.token_urlsafe(64)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
 
-    authorize_url = AUTHORIZE_URL + "?" + urllib.parse.urlencode(
-        {
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": REDIRECT_URI,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }
-    )
-    webbrowser.open(authorize_url)
-    code = _wait_for_redirect()
+        authorize_url = AUTHORIZE_URL + "?" + urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            }
+        )
+        webbrowser.open(authorize_url)
+        code = _wait_for_redirect(httpd)
+    finally:
+        httpd.server_close()
 
     resp = _post_form(
         TOKEN_URL,
         {
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": REDIRECT_URI,
+            "redirect_uri": redirect_uri,
             "client_id": client_id,
             "code_verifier": verifier,
         },
@@ -217,6 +239,11 @@ class MCPClient:
             token = self.login()
             self.token_store.save(token)
         elif token["expires_at"] <= self.now():
-            token = self.refresh(token["refresh_token"])
+            # RFC 6749: refresh_token is optional in a token response. If the
+            # server never gave us one, there's nothing to refresh with.
+            if token.get("refresh_token"):
+                token = self.refresh(token["refresh_token"])
+            else:
+                token = self.login()
             self.token_store.save(token)
         return token["access_token"]
