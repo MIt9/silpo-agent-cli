@@ -1,12 +1,51 @@
 # Silpo MCP server — live schema notes
 
-Status: **auth endpoints verified live, and address-related tools now
-verified live too** (2026-08-04, via a separately-configured MCP client
-connection — see "Live-verified: address tools" below, and
-`mcp_auth_cloudflare_block.md` in the assistant's memory for why
-`silpo_agent/auth.py`'s own login flow still can't reach the server itself).
-Order/cart/promo/substitution tools remain unverified — see "What's
-unverified" below.
+Status: **`silpo_agent/auth.py`'s own login flow now works end-to-end
+live**, and `silpo-agent reorder` has been run against the real account
+through its own binary (2026-08-04) — see "Live end-to-end run" below.
+Everything under "Live-verified: address tools" / "Live-verified: all
+remaining tools" was originally captured via a separately-configured MCP
+client connection (not this project's own `auth.py`); that channel's
+findings are unaffected by anything below.
+
+## Live end-to-end run (2026-08-04, via `auth.py`'s own login)
+
+`auth.py`'s browser login was previously hard-blocked by Cloudflare — root
+cause was `redirect_uri` using the `127.0.0.1` IP literal instead of the
+`localhost` hostname (fixed, see `mcp_auth_cloudflare_block.md` in the
+assistant's memory for the full trail). After that fix, running
+`uv run silpo-agent reorder --last 5 --threshold 0.5` against the real
+account surfaced two more real bugs, now fixed:
+
+1. **`call_tool_http()` never unwrapped the MCP `tools/call` response
+   envelope.** The real transport wraps a tool's JSON output as a string
+   inside `result.content[0].text`, not as already-parsed data. Every
+   module was silently getting `{"content": [...]}` instead of the tool's
+   actual response — invisible to unit tests, since they all mock `call()`
+   itself, above this transport layer. Fixed with a small
+   `_unwrap_tool_result()` helper in `auth.py`.
+2. **`cli.py` never unwrapped `silpo_get_my_online_orders`'s response**,
+   passing `{"success", "summary", "orders": [...], "meta": {...}}`
+   straight to `derive_typical_items()`, which does `len(orders)` expecting
+   a list — `len()` on a 4-key dict silently produced `"found 4"`
+   regardless of real order count (the account has 326). Also added an
+   explicit `limit` param to the call (the tool defaults to 10), since
+   `--last` values above 10 would otherwise silently under-count.
+
+With both fixed, a full `reorder` run now completes the real pipeline:
+address confirmed with a readable label, cart context resolved (including
+real `validations` — this account's actual cart has a stale timeslot and
+two out-of-stock items), the non-empty-cart guard correctly triggered and
+aborted cleanly on decline (cart left unchanged), typical items derived
+from real order history, and Substitution Resolver ran — reporting all
+checked items "unavailable". That last part matches issue #18's own
+documented weakest assumption (using `TypicalItem.product_id`, a raw UUID,
+as the free-text query to `silpo_find_products_batch`) rather than
+indicating a new bug — worth a dedicated follow-up ticket if the
+Substitution Resolver's real-world hit rate matters (e.g. searching by
+`TypicalItem.name` first, only falling back to product_id, is already
+partially done per #18 — but a raw UUID search apparently still returns
+nothing useful when name is absent, which was the assumed risk).
 
 ## Live-verified: address tools (2026-08-04)
 
