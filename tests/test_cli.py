@@ -1,4 +1,5 @@
 from silpo_agent.cli import main
+from silpo_agent.log_store import ReorderLogStore
 
 
 class FakeClient:
@@ -16,7 +17,7 @@ def test_no_args_prints_help_and_exits_zero(capsys):
     assert "silpo-agent" in capsys.readouterr().out
 
 
-def test_reorder_fills_cart_and_prints_report(capsys):
+def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
     orders = [
         {"items": [{"product_id": "milk", "price": 45.0}]},
         {"items": [{"product_id": "milk", "price": 44.0}]},
@@ -29,8 +30,10 @@ def test_reorder_fills_cart_and_prints_report(capsys):
             ],
         }
     )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
 
-    exit_code = main(["reorder", "--last", "2", "--threshold", "1.0"], client=client)
+    exit_code = main(["reorder", "--last", "2", "--threshold", "1.0"], client=client, log_store=log_store)
 
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -41,15 +44,47 @@ def test_reorder_fills_cart_and_prints_report(capsys):
         "silpo_add_or_update_cart_products",
         {"items": [{"product_id": "milk", "quantity": 1}]},
     ) in client.calls
+    # Address Resolver runs ahead of Order Aggregator, per PRD pipeline order.
+    tool_order = [tool for tool, _ in client.calls]
+    assert tool_order.index("silpo_get_my_delivery_addresses") < tool_order.index("silpo_get_my_online_orders")
+    # Confirmed address is written to the Reorder Log for audit.
+    assert log_store.read_history()[0]["address"] == "Kyiv, Some St 1"
 
 
-def test_reorder_with_insufficient_orders_errors_without_touching_cart(capsys):
-    client = FakeClient({"silpo_get_my_online_orders": []})
+def test_reorder_with_insufficient_orders_errors_without_touching_cart(capsys, monkeypatch, tmp_path):
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": [],
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
 
-    exit_code = main(["reorder", "--last", "3", "--threshold", "0.5"], client=client)
+    exit_code = main(["reorder", "--last", "3", "--threshold", "0.5"], client=client, log_store=log_store)
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert captured.out == ""
     assert "0" in captured.err and "3" in captured.err
     assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_reorder_aborts_before_search_when_address_not_resolved(capsys, monkeypatch, tmp_path):
+    """Delivery context determines product availability/pricing (PRD Address
+    Resolver section), so an unresolved address hard-stops the run before
+    product search — same treatment as insufficient order history.
+    """
+    client = FakeClient({"silpo_get_my_delivery_addresses": []})
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")  # blank -> no new address entered
+
+    exit_code = main(["reorder", "--last", "2", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "address" in captured.err
+    assert all(call[0] != "silpo_get_my_online_orders" for call in client.calls)
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+    assert log_store.read_history() == []

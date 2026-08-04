@@ -1,32 +1,25 @@
-"""silpo-agent CLI entrypoint. `reorder` wires the Order Aggregator and Cart
-Writer together for the happy path (issue #3): fetch orders, derive typical
-items, silently use the default delivery address, fill the cart, report.
-
-Address confirmation UX, substitution handling, promo optimization, and
-budget cap are separate tickets (#4, #5, #6) — not built here.
+"""silpo-agent CLI entrypoint. `reorder` wires the pipeline together per the
+PRD's module order: Address Resolver -> Order Aggregator -> Cart Writer ->
+report. Substitution handling, promo optimization, and budget cap are
+separate tickets (#5, #6) — not built here.
 """
 
 import argparse
 import sys
 
+from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient
 from silpo_agent.cart_writer import write_cart
+from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
 
 
-def _resolve_default_address(client) -> str | None:
-    """Silent default-address use only (no confirmation UX — issue #4):
-    picks the MCP-marked default, falling back to the first saved address.
-    Schema of each address entry is unverified live — see docs/mcp_schema.md.
-    """
-    addresses = client.call("silpo_get_my_delivery_addresses") or []
-    if not addresses:
-        return None
-    default = next((a for a in addresses if a.get("is_default")), addresses[0])
-    return default.get("address") or default.get("id")
+def _run_reorder(last: int, threshold: float, client, log_store) -> int:
+    address = resolve_address(client, log_store)
+    if address is None:
+        print("reorder: no delivery address resolved; aborting before product search", file=sys.stderr)
+        return 1
 
-
-def _run_reorder(last: int, threshold: float, client) -> int:
     orders = client.call("silpo_get_my_online_orders") or []
     try:
         typical_items = derive_typical_items(orders, last=last, threshold=threshold)
@@ -34,11 +27,10 @@ def _run_reorder(last: int, threshold: float, client) -> int:
         print(f"reorder: {exc}", file=sys.stderr)
         return 1
 
-    address = _resolve_default_address(client)
     report = write_cart(client, typical_items)
 
     if address:
-        print(f"Delivering to: {address}")
+        print(f"Delivering to: {address.label}")
     print(f"Added {len(report.items_added)} item(s):")
     for product_id, price in report.items_added:
         print(f"  - {product_id}: {price:.2f}")
@@ -46,7 +38,7 @@ def _run_reorder(last: int, threshold: float, client) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None, *, client=None) -> int:
+def main(argv: list[str] | None = None, *, client=None, log_store=None) -> int:
     parser = argparse.ArgumentParser(prog="silpo-agent", description="CLI wrapper over the Silpo MCP server")
     subparsers = parser.add_subparsers(dest="command")
     reorder_parser = subparsers.add_parser("reorder", help="Rebuild the cart from your typical items")
@@ -62,7 +54,7 @@ def main(argv: list[str] | None = None, *, client=None) -> int:
         return 0
 
     if args.command == "reorder":
-        return _run_reorder(args.last, args.threshold, client or MCPClient())
+        return _run_reorder(args.last, args.threshold, client or MCPClient(), log_store or ReorderLogStore())
 
     return 0
 

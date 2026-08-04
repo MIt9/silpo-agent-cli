@@ -33,6 +33,15 @@ class ReorderLogStore:
         self.path.write_text(json.dumps(data, indent=2))
 
     def append_run(self, run: dict) -> None:
+        # ponytail: load-mutate-save, not atomic — two append_run calls in
+        # close succession (e.g. within one `reorder` run) can race, the
+        # second's _load happening before the first's _save lands, losing
+        # a write. Fine today: the only caller is
+        # address_resolver.resolve_address, once per `reorder` run (via
+        # cli.py). If a future ticket adds a second append_run per run
+        # (e.g. a full run record alongside this address audit record),
+        # merge both into a single append_run call here instead of adding
+        # file locking.
         data = self._load()
         data["runs"].append(run)
         self._save(data)
