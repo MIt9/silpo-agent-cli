@@ -684,3 +684,75 @@ implementation are still assumptions, not confirmed live:
   (the key used by confirmed cart/order product shapes elsewhere in this
   codebase) rather than hard-failing with a `KeyError` if the real shape
   turns out to differ.
+
+## Scope decision made in issue #20 (redesign Promo Optimizer against live-verified MCP schema)
+
+Issue #20 replaced the two invented tools in `silpo_agent/promo_optimizer.py`
+(`silpo_get_promo_equivalent`, `silpo_get_available_bonuses` — see
+"Assumptions made in issue #7" above) with the real Promo/loyalty tools
+documented above. **Scope was narrowed to bonus application only; the
+promo-swap half ("swap a Typical Item for a cheaper promo equivalent") was
+dropped entirely.** The issue explicitly permitted this narrowing if the
+swap heuristic proved too unreliable to be worth shipping, which is the
+judgment call made here:
+
+- **Why the swap was dropped**: the only real tool that browses promo
+  products is `silpo_get_products({"mustHavePromotion": true,
+  "promotionCode": "<code from silpo_get_promotions>", ...})`, and per its
+  documented schema it only filters by `category`/`mustHavePromotion`/
+  `promotionCode`/`set` — no free-text search parameter is documented
+  anywhere in the live-verified sweep. Without a text-search filter, "find
+  the promo equivalent of Typical Item X" would mean either (a) guessing an
+  unconfirmed extra parameter on `silpo_get_products`, or (b) paging through
+  entire promo categories and fuzzy-matching product names against the
+  Typical Item's `name` — genuinely unreliable (false-positive swaps to a
+  wrong, merely-similarly-named product are a real risk with money on the
+  line) and not something this ticket could validate against a live call.
+  This is exactly the "heuristic proves too unreliable" case the issue
+  anticipated; rather than ship a name-matching guess against an unverified
+  parameter, the swap feature is cut. `TypicalItem` still carries `name` for
+  a future ticket that wants to revisit this once `silpo_get_products`'s
+  full parameter list is confirmed live (e.g. an actual search/query field
+  might exist but wasn't exercised in the sweep).
+- **Why bonus application was kept**: it needs no matching heuristic and no
+  new lookup call. `silpo_get_shopping_cart_by_id`'s response — already
+  fetched once per `reorder` run by the Cart Context Resolver (#17) — carries
+  `loyalty.bonusAvailable` alongside the cart itself. `CartContext` (in
+  `cart_context.py`) was extended with `bonus_available` (from
+  `response["loyalty"]["bonusAvailable"]`) plus the raw `timeslot`/
+  `address`/`shipments` objects `silpo_update_shopping_cart` requires
+  verbatim per its own tool description (not reconstructed field-by-field —
+  same precedent as issue #19 extending `CartContext` for `.products`).
+  `optimize_promos(client, items, cart_context)` calls
+  `silpo_update_shopping_cart` with `bonusRequested=cart_context.bonus_available`
+  only when that value is truthy AND `shoppingCartId`/`deliveryType`/
+  `timeslot`/`address`/`shipments` are all present on `cart_context` — the
+  last four are required verbatim by the call, so a resolved-but-incomplete
+  context (e.g. no shipments recorded yet, a legitimate `CartContext` state)
+  skips the call rather than send `None` into a required field, same guard
+  style as Substitution Resolver's (#18) no-cart-context skip. No bonus
+  (`None`/`0`) or an unresolved cart context (first-ever run) also makes
+  zero calls, mirroring the "nothing to do, no call" pattern used by Cart
+  Writer (#19). The call's response is checked too (`response.get("success")`,
+  the envelope every real tool response uses per this doc) before reporting
+  `bonus_applied` — a mutating call's success is never assumed silently, per
+  code review on the #20 PR.
+- **`promoCode` intentionally left `null`**: `silpo_get_promo_codes()`
+  returned an empty list for the live test account, so there is no verified
+  case to apply a promo code against — the issue explicitly said not to
+  over-build for an unverified case. If a later ticket confirms a non-empty
+  `silpo_get_promo_codes()` response for some account, wiring `promoCode`
+  onto this same `silpo_update_shopping_cart` call is a small, additive
+  change to `optimize_promos`, not a redesign.
+- **`PromoResult` shape change**: `.swaps` and `.bonuses_applied` (a list of
+  bonus/promo-code ids) are gone; `PromoResult` now carries `.items`
+  (pass-through, unchanged — nothing rewrites the cart line items anymore)
+  and `.bonus_applied` (the numeric amount requested, or `None`).
+  `cli.py`'s report line changed from "Promo swap: X -> Y" /
+  "Applied bonuses/promo codes: ..." to "Applied N.NN bonus points to cart".
+- **Pipeline placement unchanged**: `cli.py` still calls `optimize_promos`
+  between Substitution Resolver and Cart Writer, only when `--optimize
+  promos` is passed — a plain `reorder` makes zero calls to
+  `silpo_update_shopping_cart` (verified in `test_cli.py`'s flag-off test,
+  which now also asserts no such call even when a bonus balance IS
+  available on the resolved cart, since the flag alone must gate it).

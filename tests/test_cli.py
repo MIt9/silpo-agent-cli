@@ -45,11 +45,13 @@ def _replacements(**product_to_candidates):
     }
 
 
-def _resolved_cart_context():
+def _resolved_cart_context(bonus_available=None):
     """A resolved (non-None branchId/companyId) CartContext's underlying
     tool responses -- resolve_substitutions now skips its MCP calls entirely
     when these are unresolved (all-None), so every test exercising
-    Substitution Resolver behavior needs a real cart context."""
+    Substitution Resolver behavior needs a real cart context. `bonus_available`
+    feeds the Promo Optimizer's (issue #20) bonus-application call via the
+    real response's top-level "loyalty.bonusAvailable" field."""
     return {
         "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
         "silpo_get_shopping_cart_by_id": {
@@ -57,9 +59,11 @@ def _resolved_cart_context():
             "cart": {
                 "deliveryType": "DeliveryHome",
                 "timeslot": {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"},
+                "address": {"city": "Kyiv"},
                 "shipments": [{"companyId": "c1", "branchId": "b1", "products": []}],
                 "calculation": {"validations": []},
             },
+            "loyalty": {"bonusAvailable": bonus_available},
         },
     }
 
@@ -517,13 +521,10 @@ def test_reorder_aborts_before_search_when_address_not_resolved(capsys, monkeypa
     assert log_store.read_history() == []
 
 
-_PROMO_TOOLS = {"silpo_get_promo_equivalent", "silpo_get_available_bonuses", "silpo_update_shopping_cart"}
-
-
 def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, monkeypatch, tmp_path):
     """Flag-off must be a true no-op for promo optimization (CONTEXT.md's
-    "Promo optimization" entry / issue #7 acceptance criteria) -- no
-    promo-equivalent lookup, no bonus lookup, no cart-wide update call.
+    "Promo optimization" entry / issue #20 acceptance criteria) -- no
+    cart-wide update call, even when a bonus balance is available.
     """
     orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
     client = FakeClient(
@@ -533,7 +534,7 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk"),
-            **_resolved_cart_context(),
+            **_resolved_cart_context(bonus_available=24.27),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -543,8 +544,7 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert all(call[0] not in _PROMO_TOOLS for call in client.calls)
-    assert "Promo swap" not in out
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
     assert "bonus" not in out.lower()
     assert (
         "silpo_add_or_update_cart_products",
@@ -564,7 +564,7 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
     ) in client.calls
 
 
-def test_reorder_optimize_promos_swaps_item_and_applies_bonuses(capsys, monkeypatch, tmp_path):
+def test_reorder_optimize_promos_applies_available_bonus(capsys, monkeypatch, tmp_path):
     orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
     client = FakeClient(
         {
@@ -573,9 +573,8 @@ def test_reorder_optimize_promos_swaps_item_and_applies_bonuses(capsys, monkeypa
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk"),
-            "silpo_get_promo_equivalent": {"product_id": "milk-promo", "price": 40.0},
-            "silpo_get_available_bonuses": [{"id": "bonus-1"}],
-            **_resolved_cart_context(),
+            "silpo_update_shopping_cart": {"success": True},
+            **_resolved_cart_context(bonus_available=24.27),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -589,16 +588,15 @@ def test_reorder_optimize_promos_swaps_item_and_applies_bonuses(capsys, monkeypa
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "Promo swap: milk -> milk-promo" in out
-    assert "bonus-1" in out
-    assert "Total: 40.00" in out
+    assert "Applied 24.27 bonus points to cart" in out
+    assert "Total: 45.00" in out
     assert (
         "silpo_add_or_update_cart_products",
         {
             "shoppingCartId": "cart-1",
             "products": [
                 {
-                    "productId": "milk-promo",
+                    "productId": "milk",
                     "companyId": "c1",
                     "branchId": "b1",
                     "quantity": 1,
@@ -608,11 +606,22 @@ def test_reorder_optimize_promos_swaps_item_and_applies_bonuses(capsys, monkeypa
             ],
         },
     ) in client.calls
-    assert ("silpo_update_shopping_cart", {"bonus_ids": ["bonus-1"]}) in client.calls
+    assert (
+        "silpo_update_shopping_cart",
+        {
+            "shoppingCartId": "cart-1",
+            "deliveryType": "DeliveryHome",
+            "timeslot": {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"},
+            "address": {"city": "Kyiv"},
+            "shipments": [{"companyId": "c1", "branchId": "b1", "products": []}],
+            "bonusRequested": 24.27,
+            "promoCode": None,
+        },
+    ) in client.calls
     # Promo Optimizer runs between Substitution Resolver and Cart Writer.
     tool_order = [tool for tool, _ in client.calls]
-    assert tool_order.index("silpo_find_products_batch") < tool_order.index("silpo_get_promo_equivalent")
-    assert tool_order.index("silpo_get_promo_equivalent") < tool_order.index("silpo_add_or_update_cart_products")
+    assert tool_order.index("silpo_find_products_batch") < tool_order.index("silpo_update_shopping_cart")
+    assert tool_order.index("silpo_update_shopping_cart") < tool_order.index("silpo_add_or_update_cart_products")
 
 
 def test_reorder_optimize_invalid_choice_rejected(capsys, monkeypatch, tmp_path):
