@@ -27,7 +27,11 @@ AUTHORIZE_URL = "https://mcp.silpo.ua/authorize"
 TOKEN_URL = "https://mcp.silpo.ua/token"
 REGISTER_URL = "https://mcp.silpo.ua/register"
 REDIRECT_PORT = 8765
-REDIRECT_URI = f"http://127.0.0.1:{REDIRECT_PORT}/callback"
+# "localhost", not the 127.0.0.1 literal -- a real working Claude Code ->
+# mcp.silpo.ua authorize request (HAR-captured 2026-08-04) used
+# "localhost", ours used the raw IP; that request never hit the Cloudflare
+# block this one did, so this may be a distinguishing factor worth testing.
+REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/callback"
 
 KEYRING_SERVICE = "silpo-agent"
 KEYRING_USERNAME = "mcp-token"
