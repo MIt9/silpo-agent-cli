@@ -1,7 +1,66 @@
 # Silpo MCP server — live schema notes
 
-Status as of this ticket: **auth endpoints verified live, `tools/list` schema
-NOT verified** — see "What's unverified" below.
+Status: **auth endpoints verified live, and address-related tools now
+verified live too** (2026-08-04, via a separately-configured MCP client
+connection — see "Live-verified: address tools" below, and
+`mcp_auth_cloudflare_block.md` in the assistant's memory for why
+`silpo_agent/auth.py`'s own login flow still can't reach the server itself).
+Order/cart/promo/substitution tools remain unverified — see "What's
+unverified" below.
+
+## Live-verified: address tools (2026-08-04)
+
+Confirmed by direct live calls. **`silpo_agent/address_resolver.py`'s
+assumptions are wrong in four ways** — tracked as a follow-up ticket, not
+fixed in this note:
+
+- **`silpo_get_my_delivery_addresses`** takes no args. Real response:
+  ```json
+  {"success": true, "summary": "Found 9 delivery addresses", "addresses": [
+    {"id": "uuid", "tag": null, "city": "...", "street": "...",
+     "building": "...", "apartment": "...|null", "floor": "...|null",
+     "entrance": "...|null", "latitude": 49.x, "longitude": 28.x,
+     "comment": "...|null"}
+  ]}
+  ```
+  Top-level is `{"success", "summary", "addresses"}`, not a bare list.
+  **No `"is_default"` field exists anywhere** — `address_resolver.py`'s
+  `next((a for a in addresses if a.get("is_default")), addresses[0])` always
+  falls through to `addresses[0]`, i.e. "MCP-marked default" (the
+  CONTEXT.md/PRD assumption) doesn't exist server-side; it's really just
+  "whatever order the API returns them in." **No `"address"` or `"label"`
+  field either** — `_to_resolved()`'s label fallback
+  (`address.get("address") or address.get("label") or address.get("id")`)
+  always falls through to the raw UUID `id`, so every confirmation prompt
+  currently displays a UUID instead of a readable address (e.g. "Deliver to
+  9930af7e-07be-4f3a-898a-3ed7435ec655?"). Needs a real label built from
+  `city`/`street`/`building`/`apartment`.
+- **`silpo_find_address`** takes `{"address": "<free text>"}` — **not**
+  `{"query": ...}` as `address_resolver.py` currently sends
+  (`client.call("silpo_find_address", {"query": query})`). Real response:
+  ```json
+  {"success": true, "summary": "Found 1 addresses", "addresses": [
+    {"address": "Вінниця, Варшавська вулиця, 27", "city": "...",
+     "street": "...", "houseNumber": "...", "district": "...",
+     "latitude": 49.x, "longitude": 28.x}
+  ]}
+  ```
+  This is a geocode result, not a saved-address record — **no `"id}"`
+  field**, so `_enter_new_address`'s `resolved.id` is always `None` for a
+  newly-entered address. Field is `houseNumber`, not `building` (differs
+  from the saved-address shape above).
+- **`silpo_get_available_delivery_types`** takes `{"latitude": ..., "longitude": ...}`
+  — **not** `{"address_id": ...}` as `address_resolver.py` currently sends.
+  Since a freshly-geocoded address also has no `id`, this call is broken two
+  ways at once: wrong param name, and the value it would send is always
+  `None`. This means the branch/delivery-context resolution step — which the
+  PRD calls out as the reason address resolution runs before product search
+  — is not actually happening correctly today for the new-address path.
+
+## Original status note (superseded above for address tools)
+
+Status as of the original foundations ticket: **auth endpoints verified
+live, `tools/list` schema NOT verified** — see "What's unverified" below.
 
 ## Verified against the live server (`https://mcp.silpo.ua/mcp`)
 
