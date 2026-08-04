@@ -28,7 +28,7 @@ Real schemas (live-verified, see ../../docs/mcp_schema.md):
   sourced from whichever resolved address's coordinates (saved or geocoded).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 
@@ -38,6 +38,12 @@ class ResolvedAddress:
     label: str
     latitude: float | None
     longitude: float | None
+    # Raw `silpo_get_available_delivery_types` response for this address's
+    # coordinates, if looked up below -- `None` when coordinates were missing
+    # so the lookup was skipped. Exposed so the Cart Context Resolver's
+    # no-shipments fallback (issue #29) can reuse this call's result instead
+    # of duplicating it.
+    delivery_types: dict | None = None
 
 
 def _build_label(address: dict) -> str:
@@ -114,10 +120,11 @@ def resolve_address(client, log_store, *, input_fn=None, print_fn=None) -> Resol
         # context (a malformed saved-address entry, e.g.) -- skip rather than
         # send nulls to the real API.
         if resolved.latitude is not None and resolved.longitude is not None:
-            client.call(
+            delivery_types = client.call(
                 "silpo_get_available_delivery_types",
                 {"latitude": resolved.latitude, "longitude": resolved.longitude},
             )
+            resolved = replace(resolved, delivery_types=delivery_types)
         log_store.append_run(
             {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),

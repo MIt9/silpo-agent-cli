@@ -1,3 +1,4 @@
+from silpo_agent.address_resolver import ResolvedAddress
 from silpo_agent.cart_context import resolve_cart_context
 
 
@@ -9,6 +10,50 @@ class FakeClient:
     def call(self, tool, args=None):
         self.calls.append((tool, args))
         return self.responses.get(tool)
+
+
+class FakeLogStore:
+    def __init__(self):
+        self.runs = []
+        self.substitutions = {}
+
+    def append_run(self, run):
+        self.runs.append(run)
+
+    def set_substitution(self, item_id, replacement_id):
+        self.substitutions[item_id] = replacement_id
+
+    def get_substitution(self, item_id):
+        return self.substitutions.get(item_id)
+
+
+def make_input(*answers):
+    it = iter(answers)
+
+    def input_fn(prompt=""):
+        return next(it)
+
+    return input_fn
+
+
+def addresses_response(*addresses):
+    return {"success": True, "summary": f"Found {len(addresses)} delivery addresses", "addresses": list(addresses)}
+
+
+def saved_address(id, city, street, building, latitude=49.1, longitude=28.1):
+    return {
+        "id": id,
+        "tag": None,
+        "city": city,
+        "street": street,
+        "building": building,
+        "apartment": None,
+        "floor": None,
+        "entrance": None,
+        "latitude": latitude,
+        "longitude": longitude,
+        "comment": None,
+    }
 
 
 def cart_response(cart, loyalty=None):
@@ -72,8 +117,8 @@ def test_resolves_non_empty_cart_products_for_cart_writer_guard():
     assert context.products == products
 
 
-def test_empty_fresh_cart_has_no_shipment_context():
-    client = FakeClient(
+def _empty_shipments_cart_client(extra_responses=None):
+    return FakeClient(
         {
             "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-2"},
             "silpo_get_shopping_cart_by_id": cart_response(
@@ -85,10 +130,21 @@ def test_empty_fresh_cart_has_no_shipment_context():
                     "calculation": {"validations": []},
                 }
             ),
+            **(extra_responses or {}),
         }
     )
 
-    context = resolve_cart_context(client, print_fn=lambda *a: None)
+
+def test_empty_fresh_cart_with_no_resolvable_address_has_no_shipment_context():
+    """When the address-resolver fallback itself can't resolve an address
+    (no saved addresses, blank new-address entry), the cart context is left
+    exactly as before -- all-None branch/delivery context, nothing crashes."""
+    client = _empty_shipments_cart_client({"silpo_get_my_delivery_addresses": addresses_response()})
+    log_store = FakeLogStore()
+
+    context = resolve_cart_context(
+        client, print_fn=lambda *a: None, input_fn=make_input(""), log_store=log_store
+    )
 
     assert context.shopping_cart_id == "cart-2"
     assert context.branch_id is None
@@ -102,6 +158,88 @@ def test_empty_fresh_cart_has_no_shipment_context():
     assert context.timeslot is None
     assert context.address is None
     assert context.shipments == []
+
+
+def test_cart_with_shipments_does_not_trigger_address_fallback():
+    """A cart that already has real shipment/branch context must never run
+    the address-resolver fallback -- not even a lookup call, let alone a
+    prompt -- regardless of what's passed for resolved_address/log_store."""
+    client = FakeClient(
+        {
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": cart_response(full_cart()),
+        }
+    )
+
+    context = resolve_cart_context(client, print_fn=lambda *a: None)
+
+    assert context.branch_id == "b1"
+    assert context.company_id == "c1"
+    assert context.delivery_type == "DeliveryHome"
+    assert all(
+        call[0] not in ("silpo_get_my_delivery_addresses", "silpo_find_address", "silpo_get_available_delivery_types")
+        for call in client.calls
+    )
+
+
+def test_no_shipments_with_preresolved_address_reuses_its_delivery_types():
+    """Issue #29: when the caller (e.g. reorder's pipeline) already resolved
+    an address itself, resolve_cart_context must reuse its attached
+    delivery_types rather than prompting again or calling
+    silpo_get_available_delivery_types a second time."""
+    resolved_address = ResolvedAddress(
+        id="a1",
+        label="Kyiv, Some St 1",
+        latitude=50.45,
+        longitude=30.52,
+        delivery_types={
+            "success": True,
+            "branchId": "fallback-b1",
+            "companyId": "fallback-c1",
+            "deliveryTypes": [{"type": "DeliveryHome", "branchId": "fallback-b1", "companyId": "fallback-c1"}],
+        },
+    )
+    client = _empty_shipments_cart_client()
+
+    context = resolve_cart_context(client, print_fn=lambda *a: None, resolved_address=resolved_address)
+
+    assert context.branch_id == "fallback-b1"
+    assert context.company_id == "fallback-c1"
+    assert context.delivery_type == "DeliveryHome"
+    assert all(
+        call[0] not in ("silpo_get_my_delivery_addresses", "silpo_find_address", "silpo_get_available_delivery_types")
+        for call in client.calls
+    )
+
+
+def test_no_shipments_without_preresolved_address_runs_interactive_fallback():
+    """When nobody upstream already resolved an address (a command other
+    than reorder calling resolve_cart_context directly), the fallback runs
+    the Address Resolver's own interactive flow itself."""
+    client = _empty_shipments_cart_client(
+        {
+            "silpo_get_my_delivery_addresses": addresses_response(
+                saved_address("a1", "Вінниця", "Варшавська вулиця", "27", latitude=49.233, longitude=28.468)
+            ),
+            "silpo_get_available_delivery_types": {
+                "success": True,
+                "branchId": "b9",
+                "companyId": "c9",
+                "deliveryTypes": [{"type": "DeliveryHome", "branchId": "b9", "companyId": "c9"}],
+            },
+        }
+    )
+    log_store = FakeLogStore()
+
+    context = resolve_cart_context(
+        client, print_fn=lambda *a: None, input_fn=make_input("y"), log_store=log_store
+    )
+
+    assert context.branch_id == "b9"
+    assert context.company_id == "c9"
+    assert context.delivery_type == "DeliveryHome"
+    assert ("silpo_get_my_delivery_addresses", None) in client.calls
+    assert log_store.runs and log_store.runs[0]["address_id"] == "a1"
 
 
 def test_validations_are_surfaced_via_print_fn_but_do_not_block():

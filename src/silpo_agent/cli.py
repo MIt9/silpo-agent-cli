@@ -37,7 +37,9 @@ def _run_reorder(
         print("reorder: no delivery address resolved; aborting before product search", file=sys.stderr)
         return 1
 
-    cart_context = resolve_cart_context(client)
+    # Pass the already-resolved address through so Cart Context Resolver's
+    # no-shipments fallback (issue #29) reuses it instead of prompting again.
+    cart_context = resolve_cart_context(client, resolved_address=address, log_store=log_store)
 
     orders_response = client.call("silpo_get_my_online_orders", {"limit": min(last, 100)}) or []
     orders = orders_response.get("orders", []) if isinstance(orders_response, dict) else orders_response

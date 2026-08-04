@@ -24,9 +24,33 @@ without a second `silpo_get_shopping_cart_by_id` call.
 Nothing else downstream consumes this module's output yet -- that wiring
 lands in the Substitution Resolver fix (#18) and Promo Optimizer redesign
 (#20).
+
+Issue #29 -- no-shipments address fallback: a fresh account or a cleared
+cart has `cart.shipments == []`, so `branchId`/`companyId`/`deliveryType`
+would otherwise resolve to `None`, breaking every downstream MCP call that
+needs real branch/delivery context (Substitution Resolver already skips its
+own calls entirely in that case -- see substitution_resolver.py's
+no-cart-context guard). When shipments are empty, this resolver now runs
+the Address Resolver (`address_resolver.resolve_address`) to get a
+confirmed address, then reads `ResolvedAddress.delivery_types` -- the raw
+`silpo_get_available_delivery_types` response `resolve_address` already
+fetches for that address's coordinates -- to fill in real `branchId`/
+`companyId`/`deliveryType`. `silpo_get_available_delivery_types`'s response
+shape is unconfirmed live (see docs/mcp_schema.md, issue #29); the extractor
+below defensively tries a few plausible shapes rather than assuming one.
+
+Callers that already resolved an address themselves (`reorder`'s pipeline,
+via `cli.py`) must pass it as `resolved_address=` so this fallback reuses it
+instead of prompting the user a second time. Callers with no address of
+their own (future `cart`/`deals`/etc. commands) can omit it -- the fallback
+then runs `resolve_address`'s own interactive confirm/pick/new-address flow,
+using `log_store`/`input_fn`/`print_fn` passed through for that purpose.
 """
 
 from dataclasses import dataclass, field
+
+from silpo_agent.address_resolver import resolve_address
+from silpo_agent.log_store import ReorderLogStore
 
 
 @dataclass(frozen=True)
@@ -64,7 +88,32 @@ def _empty_context(shopping_cart_id: str | None = None) -> CartContext:
     )
 
 
-def resolve_cart_context(client, *, print_fn=None) -> CartContext:
+def _branch_context_from_delivery_types(response: dict | None) -> tuple[str | None, str | None, str | None]:
+    """Best-effort (branch_id, company_id, delivery_type) extraction from a
+    `silpo_get_available_delivery_types` response. Unconfirmed live shape
+    (see docs/mcp_schema.md, issue #29) -- tries top-level fields first, then
+    the first (or first `available`) entry of a `deliveryTypes` list."""
+    if not isinstance(response, dict):
+        return None, None, None
+
+    branch_id = response.get("branchId")
+    company_id = response.get("companyId")
+    delivery_type = response.get("deliveryType")
+
+    options = response.get("deliveryTypes")
+    if isinstance(options, list) and options:
+        chosen = next((o for o in options if isinstance(o, dict) and o.get("available", True)), options[0])
+        if isinstance(chosen, dict):
+            branch_id = branch_id or chosen.get("branchId")
+            company_id = company_id or chosen.get("companyId")
+            delivery_type = delivery_type or chosen.get("type") or chosen.get("deliveryType")
+
+    return branch_id, company_id, delivery_type
+
+
+def resolve_cart_context(
+    client, *, print_fn=None, input_fn=None, log_store=None, resolved_address=None
+) -> CartContext:
     print_fn = print_fn or print
 
     my_cart = client.call("silpo_get_my_shopping_cart") or {}
@@ -84,11 +133,27 @@ def resolve_cart_context(client, *, print_fn=None) -> CartContext:
     for validation in validations:
         print_fn(f"Cart validation [{validation.get('level')}]: {validation.get('message')}")
 
+    branch_id = shipment.get("branchId")
+    company_id = shipment.get("companyId")
+    delivery_type = cart.get("deliveryType")
+
+    if not shipments:
+        # Fresh account / cleared cart: no delivery context established yet.
+        # Fall back to the Address Resolver + silpo_get_available_delivery_types
+        # (reused off ResolvedAddress.delivery_types) for real branch/delivery
+        # context (issue #29). Reuse the caller's already-resolved address
+        # (reorder's pipeline) instead of prompting the user a second time.
+        address = resolved_address
+        if address is None:
+            address = resolve_address(client, log_store or ReorderLogStore(), input_fn=input_fn, print_fn=print_fn)
+        if address is not None:
+            branch_id, company_id, delivery_type = _branch_context_from_delivery_types(address.delivery_types)
+
     return CartContext(
         shopping_cart_id=shopping_cart_id,
-        branch_id=shipment.get("branchId"),
-        company_id=shipment.get("companyId"),
-        delivery_type=cart.get("deliveryType"),
+        branch_id=branch_id,
+        company_id=company_id,
+        delivery_type=delivery_type,
         timeslot_start=timeslot.get("start"),
         timeslot_end=timeslot.get("end"),
         validations=validations,

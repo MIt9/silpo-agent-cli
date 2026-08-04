@@ -127,6 +127,47 @@ def test_accepting_saved_address_looks_up_delivery_types_by_coordinates():
     assert ("silpo_get_available_delivery_types", {"latitude": 49.233, "longitude": 28.468}) in client.calls
 
 
+def test_resolved_address_carries_delivery_types_response_for_reuse():
+    """Issue #29: the Cart Context Resolver's no-shipments fallback reuses
+    this call's result instead of calling silpo_get_available_delivery_types
+    a second time -- so resolve_address must expose it on ResolvedAddress
+    rather than discarding it."""
+    delivery_types_response = {
+        "success": True,
+        "branchId": "b1",
+        "companyId": "c1",
+        "deliveryTypes": [{"type": "DeliveryHome", "branchId": "b1", "companyId": "c1"}],
+    }
+    client = FakeClient(
+        {
+            "silpo_get_my_delivery_addresses": addresses_response(
+                saved_address("a1", "Вінниця", "Варшавська вулиця", "27", latitude=49.233, longitude=28.468),
+            ),
+            "silpo_get_available_delivery_types": delivery_types_response,
+        }
+    )
+    log_store = FakeLogStore()
+
+    resolved = resolve_address(client, log_store, input_fn=make_input("y"), print_fn=lambda *a: None)
+
+    assert resolved.delivery_types == delivery_types_response
+
+
+def test_resolved_address_missing_coordinates_leaves_delivery_types_none():
+    client = FakeClient(
+        {
+            "silpo_get_my_delivery_addresses": addresses_response(
+                saved_address("a1", "Вінниця", "Варшавська вулиця", "27", latitude=None, longitude=None),
+            )
+        }
+    )
+    log_store = FakeLogStore()
+
+    resolved = resolve_address(client, log_store, input_fn=make_input("y"), print_fn=lambda *a: None)
+
+    assert resolved.delivery_types is None
+
+
 def test_resolved_address_missing_coordinates_skips_delivery_types_lookup():
     """A malformed saved-address entry with no lat/lon must not send nulls
     to the real silpo_get_available_delivery_types API."""

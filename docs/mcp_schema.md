@@ -795,3 +795,56 @@ judgment call made here:
   `silpo_update_shopping_cart` (verified in `test_cli.py`'s flag-off test,
   which now also asserts no such call even when a bonus balance IS
   available on the resolved cart, since the flag alone must gate it).
+
+## Assumptions made in issue #29 (Cart Context Resolver's no-shipments address fallback)
+
+`cart_context.py`'s `resolve_cart_context` previously left `branch_id`/
+`company_id`/`delivery_type` as `None` whenever `cart.shipments` was empty
+(fresh account, or a cleared cart). Issue #29 added a fallback for that case:
+run `address_resolver.resolve_address` to get a confirmed address, then
+derive real branch/delivery context from `silpo_get_available_delivery_types`
+(the same call `resolve_address` already makes for that address's
+coordinates — its result is now kept on `ResolvedAddress.delivery_types`
+instead of discarded, so this fallback reuses it rather than issuing a
+second, duplicate call with the same lat/lon).
+
+- **`silpo_get_available_delivery_types` response shape is still
+  unconfirmed live** (see "Assumptions made in issue #4" above — only the
+  request shape, `{"latitude", "longitude"}`, has been live-verified; the
+  response was never inspected since no delivery-type selection UX existed
+  before now). `cart_context._branch_context_from_delivery_types` therefore
+  tries a few plausible shapes defensively rather than assuming one: a
+  top-level `branchId`/`companyId`/`deliveryType`, or (falling back) the
+  first entry — preferring one with `available: True` if that field exists —
+  of a `deliveryTypes` list, reading `branchId`/`companyId`/`type`/
+  `deliveryType` off it. If the real response turns out to be shaped
+  differently, only this one helper needs revisiting. Genuinely unresolvable
+  input (missing/malformed) yields `(None, None, None)`, same as before this
+  ticket — no crash, no fabricated context.
+- **Reuse over duplication**: `resolve_address` now returns its
+  `silpo_get_available_delivery_types` call's raw response on
+  `ResolvedAddress.delivery_types` (`None` when coordinates were missing and
+  the call was skipped). `resolve_cart_context` reads this field directly
+  when it has a `resolved_address`, making zero extra MCP calls of its own
+  for that path.
+- **No-double-prompt handling**: `reorder`'s pipeline (`cli.py`'s
+  `_run_reorder`) already resolves an address via `resolve_address` before
+  calling `resolve_cart_context`. It now passes that address in as
+  `resolve_cart_context(client, resolved_address=address, ...)`, so the
+  fallback (which only activates when `cart.shipments` is empty) reuses it
+  instead of calling `resolve_address` a second time — verified in
+  `test_cli.py`'s `test_reorder_no_shipments_cart_reuses_address_without_second_prompt`,
+  which counts address-confirmation prompts and asserts exactly one.
+- **Self-resolving path for future callers**: commands other than `reorder`
+  (`cart`, `cart promos`, `cart edit`, `deals`, `favorites-deals` — none
+  built yet) will call `resolve_cart_context` directly with no address of
+  their own. For that case, `resolve_cart_context` now accepts optional
+  `log_store`/`input_fn`/`print_fn` and, when `resolved_address` isn't
+  given, runs `resolve_address`'s own interactive confirm/pick/new-address
+  flow itself (defaulting `log_store` to a real `ReorderLogStore()` so the
+  confirmed address is still logged for audit, matching `resolve_address`'s
+  existing behavior everywhere else it's called). Only `branch_id`/
+  `company_id`/`delivery_type` are filled in by this fallback — `timeslot_start`/
+  `timeslot_end` are left `None` even after a successful fallback, since
+  `silpo_get_available_delivery_types` carries no timeslot data; a real
+  timeslot needs a separate `silpo_get_time_slots` call, out of scope here.
