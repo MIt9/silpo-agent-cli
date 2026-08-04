@@ -121,6 +121,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         self.server.auth_code = params.get("code", [None])[0]
         self.server.auth_error = params.get("error", [None])[0]
+        self.server.auth_state = params.get("state", [None])[0]
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
@@ -130,23 +131,33 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         pass
 
 
-def _wait_for_redirect() -> str:
+def _wait_for_redirect(expected_state: str) -> str:
     httpd = HTTPServer(("127.0.0.1", REDIRECT_PORT), _CallbackHandler)
     httpd.auth_code = None
     httpd.auth_error = None
+    httpd.auth_state = None
     httpd.handle_request()
     if httpd.auth_error or not httpd.auth_code:
         raise AuthError(f"OAuth authorize redirect returned an error: {httpd.auth_error}")
+    if httpd.auth_state != expected_state:
+        raise AuthError("OAuth authorize redirect returned a mismatched state (possible CSRF)")
     return httpd.auth_code
 
 
 def pkce_browser_login() -> dict:
     """Full OAuth2.1+PKCE flow: dynamic client registration, browser
     authorize, local redirect capture, code-for-token exchange.
+
+    Includes `resource` (RFC 8707) and `state` on the authorize request --
+    a live comparison against a real, working Claude Code -> mcp.silpo.ua
+    OAuth request (2026-08-04) showed both present; this implementation was
+    missing them, which may be why mcp.silpo.ua/authorize hard-blocked this
+    flow with a Cloudflare 403 (see mcp_auth_cloudflare_block memory note).
     """
     client_id = _register_client()
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = secrets.token_urlsafe(32)
 
     authorize_url = AUTHORIZE_URL + "?" + urllib.parse.urlencode(
         {
@@ -155,10 +166,12 @@ def pkce_browser_login() -> dict:
             "redirect_uri": REDIRECT_URI,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
+            "state": state,
+            "resource": SERVER_URL,
         }
     )
     webbrowser.open(authorize_url)
-    code = _wait_for_redirect()
+    code = _wait_for_redirect(state)
 
     resp = _post_form(
         TOKEN_URL,
