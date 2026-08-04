@@ -143,3 +143,13 @@ of the ones above:
   `test_log_store.py`'s fixtures (`items_added`, `substitutions`, `total`);
   a later ticket that logs the full reorder run may want to merge these into
   one `append_run` call per run instead of two.
+- **Unresolved address hard-stops the run**: if `resolve_address` returns
+  `None` (out-of-range list choice, blank/not-found new-address entry),
+  `cli.py` prints an error and exits 1 *before* calling
+  `silpo_get_my_online_orders` or touching the cart — same treatment as
+  insufficient order history. Chosen over silently proceeding
+  uncontextualized because the PRD's Address Resolver section states
+  delivery/branch context determines product availability and pricing, so
+  running product search without it would produce results for the wrong
+  branch. Revisit only if a future ticket wants a "search anyway, ungated"
+  fallback.

@@ -69,3 +69,22 @@ def test_reorder_with_insufficient_orders_errors_without_touching_cart(capsys, m
     assert exit_code == 1
     assert "0" in captured.err and "3" in captured.err
     assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_reorder_aborts_before_search_when_address_not_resolved(capsys, monkeypatch, tmp_path):
+    """Delivery context determines product availability/pricing (PRD Address
+    Resolver section), so an unresolved address hard-stops the run before
+    product search — same treatment as insufficient order history.
+    """
+    client = FakeClient({"silpo_get_my_delivery_addresses": []})
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")  # blank -> no new address entered
+
+    exit_code = main(["reorder", "--last", "2", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "address" in captured.err
+    assert all(call[0] != "silpo_get_my_online_orders" for call in client.calls)
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+    assert log_store.read_history() == []

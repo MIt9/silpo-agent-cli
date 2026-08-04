@@ -16,6 +16,9 @@ from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_t
 
 def _run_reorder(last: int, threshold: float, client, log_store) -> int:
     address = resolve_address(client, log_store)
+    if address is None:
+        print("reorder: no delivery address resolved; aborting before product search", file=sys.stderr)
+        return 1
 
     orders = client.call("silpo_get_my_online_orders") or []
     try:

@@ -36,8 +36,12 @@ def _pick_from_list_or_new(remaining: list[dict], client, input_fn, print_fn) ->
     for i, address in enumerate(remaining, start=1):
         print_fn(f"{i}. {_to_resolved(address).label}")
     choice = input_fn("Pick a number, or type a new address: ").strip()
-    if choice.isdigit() and 1 <= int(choice) <= len(remaining):
-        return _to_resolved(remaining[int(choice) - 1])
+    if choice.isdigit():
+        idx = int(choice)
+        if 1 <= idx <= len(remaining):
+            return _to_resolved(remaining[idx - 1])
+        print_fn(f"No address numbered {idx}.")
+        return None
     return _enter_new_address(client, choice, print_fn)
 
 

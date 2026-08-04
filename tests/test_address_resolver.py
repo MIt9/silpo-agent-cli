@@ -69,6 +69,24 @@ def test_default_declined_then_pick_from_remaining_list():
     assert all(call[0] != "silpo_find_address" for call in client.calls)
 
 
+def test_out_of_range_number_choice_returns_none_and_does_not_search():
+    client = FakeClient(
+        {
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Khreshchatyk 1"},
+                {"id": "a2", "is_default": False, "address": "Kyiv, Sumska 2"},
+            ]
+        }
+    )
+    log_store = FakeLogStore()
+
+    resolved = resolve_address(client, log_store, input_fn=make_input("n", "99"), print_fn=lambda *a: None)
+
+    assert resolved is None
+    assert log_store.runs == []
+    assert all(call[0] != "silpo_find_address" for call in client.calls)
+
+
 def test_default_declined_then_type_new_address():
     client = FakeClient(
         {
