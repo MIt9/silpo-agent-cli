@@ -153,6 +153,126 @@ def test_reorder_with_insufficient_orders_errors_without_touching_cart(capsys, m
     assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
 
 
+def test_reorder_non_empty_cart_warns_and_aborts_on_decline(capsys, monkeypatch, tmp_path):
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": True},
+            "silpo_get_my_shopping_cart": {"items": [{"product_id": "leftover"}]},
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    def fake_input(prompt=""):
+        return "n" if "cart" in prompt.lower() else "y"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "cart" in out.lower()
+    assert "Added" not in out
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_reorder_non_empty_cart_warns_and_proceeds_on_confirm(capsys, monkeypatch, tmp_path):
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": True},
+            "silpo_get_my_shopping_cart": {"items": [{"product_id": "leftover"}]},
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Added 1 item" in out
+    assert (
+        "silpo_add_or_update_cart_products",
+        {"items": [{"product_id": "milk", "quantity": 1}]},
+    ) in client.calls
+
+
+def test_reorder_budget_trims_lowest_priority_items_and_reports_them(capsys, monkeypatch, tmp_path):
+    orders = [
+        {
+            "items": [
+                {"product_id": "milk", "price": 45.0},
+                {"product_id": "bread", "price": 30.0},
+                {"product_id": "chips", "price": 25.0},
+            ]
+        },
+        {"items": [{"product_id": "milk", "price": 45.0}, {"product_id": "bread", "price": 30.0}]},
+        {"items": [{"product_id": "milk", "price": 45.0}]},
+    ]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": True},
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(
+        ["reorder", "--last", "3", "--threshold", "0.3", "--budget", "75"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Total: 75.00" in out
+    assert "chips" in out
+    assert "Trimmed" in out
+    assert (
+        "silpo_add_or_update_cart_products",
+        {
+            "items": [
+                {"product_id": "milk", "quantity": 1},
+                {"product_id": "bread", "quantity": 1},
+            ]
+        },
+    ) in client.calls
+
+
+def test_reorder_without_budget_never_trims_and_reports_actual_total(capsys, monkeypatch, tmp_path):
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}, {"product_id": "bread", "price": 30.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": True},
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Total: 75.00" in out
+    assert "Trimmed" not in out
+
+
 def test_reorder_aborts_before_search_when_address_not_resolved(capsys, monkeypatch, tmp_path):
     """Delivery context determines product availability/pricing (PRD Address
     Resolver section), so an unresolved address hard-stops the run before

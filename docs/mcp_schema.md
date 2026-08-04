@@ -192,3 +192,42 @@ above:
   `write_cart`, per the PRD order Address Resolver -> Order Aggregator ->
   Substitution Resolver -> Cart Writer. Substitution/unavailable reporting
   lines are printed before the "Added N item(s)" line.
+
+## Assumptions made in issue #6 (non-empty cart guard and optional budget cap)
+
+Still no live-verified schema at implementation time. `silpo_agent/cart_writer.py`
+now reads the current cart before mutating it and can trim to a budget, on
+top of the assumptions above:
+
+- **`silpo_get_my_shopping_cart` request/response shape**: assumed to take no
+  arguments (`client.call("silpo_get_my_shopping_cart")`) and return a dict
+  with an `"items"` list — an empty or absent list means an empty cart. A
+  bare list response (no wrapping dict) is also treated as the items list
+  directly, mirroring the dict-or-list normalization already used for
+  `silpo_find_address` / `silpo_get_replacements`. `silpo_get_shopping_cart_by_id`
+  (the by-id variant named in the ticket) is not called anywhere yet — no
+  cart id is available from any tool response built so far, so this ticket
+  only wires the "my cart" read. Revisit once the real response shape (and
+  whether a cart id needs to be threaded through from another call) is
+  confirmed.
+- **Non-empty cart guard UX**: on a non-empty cart, `write_cart` prints a
+  warning and asks "Add to the existing cart anyway? [y/N]" via the same
+  `input_fn`/`print_fn` injection pattern as `address_resolver` and
+  `substitution_resolver`. A blank or non-"y" answer aborts the run *before*
+  `silpo_add_or_update_cart_products` is ever called — the cart is left
+  exactly as read, never auto-cleared or merged (per CONTEXT.md's "Non-empty
+  cart guard" entry). `cli.py` treats an aborted `CartReport` as a hard stop
+  (exit code 1), same treatment as the existing insufficient-order-history /
+  unresolved-address abort paths.
+- **Budget trim priority signal**: the Order Aggregator's `TypicalItem` only
+  carries `frequency` as a priority signal (no explicit priority field), so
+  `--budget` trims by ascending `frequency` (lowest-frequency items dropped
+  first), tie-broken by `product_id` for determinism. Trimming is a simple
+  greedy drop-lowest-priority-until-it-fits loop, not a knapsack-optimal
+  packing — it can drop more value than strictly necessary when item prices
+  don't align neatly with the cap. Revisit if the PRD ever wants an
+  optimal-fit budget trim.
+- **Guard vs. budget ordering**: the cart-read guard runs first (per the
+  PRD's "before adding anything, reads the current cart" ordering), then the
+  budget trim, then the add call — so a declined guard prompt aborts before
+  any budget trimming happens.
