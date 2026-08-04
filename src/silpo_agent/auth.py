@@ -200,7 +200,28 @@ def call_tool_http(server_url: str, tool: str, args: dict, access_token: str) ->
     resp = _post_json(server_url, payload, headers={"Authorization": f"Bearer {access_token}"})
     if "error" in resp:
         raise MCPError(resp["error"])
-    return resp.get("result", resp)
+    result = resp.get("result", resp)
+    return _unwrap_tool_result(tool, result)
+
+
+def _unwrap_tool_result(tool: str, result: dict) -> dict:
+    """MCP tools/call responses wrap a tool's actual JSON output as a string
+    inside result["content"][0]["text"] -- this parses that envelope so
+    every other module can keep working with plain dicts. Non-tool-call
+    results (e.g. tools/list) have no "content" list and pass through as-is.
+    """
+    content = result.get("content") if isinstance(result, dict) else None
+    if not content:
+        return result
+    if result.get("isError"):
+        raise MCPError(f"{tool} returned an error: {content}")
+    text = content[0].get("text") if content and isinstance(content[0], dict) else None
+    if text is None:
+        return result
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return result
 
 
 class MCPClient:

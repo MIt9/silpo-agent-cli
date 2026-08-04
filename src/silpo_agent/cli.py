@@ -38,7 +38,8 @@ def _run_reorder(
 
     cart_context = resolve_cart_context(client)
 
-    orders = client.call("silpo_get_my_online_orders") or []
+    orders_response = client.call("silpo_get_my_online_orders", {"limit": min(last, 100)}) or []
+    orders = orders_response.get("orders", []) if isinstance(orders_response, dict) else orders_response
     try:
         typical_items = derive_typical_items(orders, last=last, threshold=threshold)
     except InsufficientOrderHistoryError as exc:

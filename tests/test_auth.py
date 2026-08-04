@@ -130,3 +130,46 @@ def test_token_store_load_returns_none_for_corrupt_value(monkeypatch):
     store = TokenStore(service="test-service", username="test-user")
 
     assert store.load() is None
+import json
+
+import silpo_agent.auth as auth_module
+from silpo_agent.auth import MCPError, call_tool_http
+
+
+def test_call_tool_http_unwraps_mcp_content_text_envelope(monkeypatch):
+    inner = {"success": True, "addresses": [{"id": "a1"}]}
+
+    def fake_post_json(url, payload, headers=None):
+        assert payload["method"] == "tools/call"
+        assert payload["params"]["name"] == "silpo_get_my_delivery_addresses"
+        return {"result": {"content": [{"type": "text", "text": json.dumps(inner)}]}}
+
+    monkeypatch.setattr(auth_module, "_post_json", fake_post_json)
+
+    result = call_tool_http("https://mcp.silpo.ua/mcp", "silpo_get_my_delivery_addresses", {}, "token")
+
+    assert result == inner
+
+
+def test_call_tool_http_mcp_level_error_raises_mcp_error(monkeypatch):
+    def fake_post_json(url, payload, headers=None):
+        return {"result": {"content": [{"type": "text", "text": "boom"}], "isError": True}}
+
+    monkeypatch.setattr(auth_module, "_post_json", fake_post_json)
+
+    try:
+        call_tool_http("https://mcp.silpo.ua/mcp", "silpo_get_my_delivery_addresses", {}, "token")
+        assert False, "expected MCPError"
+    except MCPError:
+        pass
+
+
+def test_call_tool_http_passes_through_non_content_result(monkeypatch):
+    def fake_post_json(url, payload, headers=None):
+        return {"result": {"tools": []}}
+
+    monkeypatch.setattr(auth_module, "_post_json", fake_post_json)
+
+    result = call_tool_http("https://mcp.silpo.ua/mcp", "tools/list", {}, "token")
+
+    assert result == {"tools": []}
