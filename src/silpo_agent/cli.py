@@ -79,22 +79,96 @@ def _run_reorder(
     return 0
 
 
+_TOP_LEVEL_EPILOG = """\
+First run triggers a one-time browser login (OAuth2.1+PKCE against
+mcp.silpo.ua); the token is cached in your OS keyring afterward, so
+later runs don't re-prompt until it expires.
+
+commands:
+  reorder   rebuild your cart from your typical (frequently-bought) items
+
+run 'silpo-agent reorder --help' for reorder's flags and examples.
+"""
+
+_REORDER_EPILOG = """\
+what it does, in order:
+  1. confirms your delivery address (proposes the first saved address;
+     you can pick a different one or type a new one)
+  2. looks at your last --last online orders, keeps items that appear in
+     at least --threshold share of them ("typical items")
+  3. checks each typical item is still in stock; auto-substitutes when
+     there's exactly one replacement, asks you when there's more than one
+     (and remembers your answer for next time)
+  4. if --optimize promos was passed: applies any available loyalty
+     bonuses to the cart
+  5. warns you before touching a non-empty cart (never silently merges
+     or clears it) -- decline aborts with the cart untouched
+  6. if --budget was passed: trims your least-frequent typical items
+     until the total fits
+  7. adds the final item set to your real Silpo cart and prints a report
+
+it only ever fills the cart -- it never checks out or pays. that step is
+always manual, in the Silpo app or on silpo.ua.
+
+examples:
+  # typical items = bought in at least half of your last 10 orders
+  silpo-agent reorder --last 10 --threshold 0.5
+
+  # same, but cap the total spend at 1500 UAH
+  silpo-agent reorder --last 10 --threshold 0.5 --budget 1500
+
+  # same, plus apply any available loyalty bonuses to the cart
+  silpo-agent reorder --last 10 --threshold 0.5 --optimize promos
+"""
+
+
 def main(argv: list[str] | None = None, *, client=None, log_store=None) -> int:
-    parser = argparse.ArgumentParser(prog="silpo-agent", description="CLI wrapper over the Silpo MCP server")
+    parser = argparse.ArgumentParser(
+        prog="silpo-agent",
+        description="Personal CLI wrapper over the Silpo MCP server -- rebuilds your grocery cart from what you "
+        "usually buy, instead of re-typing the same list every week.",
+        epilog=_TOP_LEVEL_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command")
-    reorder_parser = subparsers.add_parser("reorder", help="Rebuild the cart from your typical items")
-    reorder_parser.add_argument("--last", type=int, required=True, help="Number of past orders to consider")
-    reorder_parser.add_argument(
-        "--threshold", type=float, required=True, help="Minimum order-frequency share (0-1) to count as typical"
+    reorder_parser = subparsers.add_parser(
+        "reorder",
+        help="Rebuild the cart from your typical items",
+        description="Rebuild your Silpo cart from the products you buy most consistently, based on your real "
+        "online order history. Fills the cart only -- checkout/payment is always a manual step.",
+        epilog=_REORDER_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     reorder_parser.add_argument(
-        "--budget", type=float, default=None, help="Optional spend cap; trims lowest-priority items to fit"
+        "--last",
+        type=int,
+        required=True,
+        metavar="N",
+        help="How many of your most recent online orders to consider. "
+        "Errors out (without touching the cart) if you have fewer than N orders.",
+    )
+    reorder_parser.add_argument(
+        "--threshold",
+        type=float,
+        required=True,
+        metavar="0-1",
+        help="Minimum share of the --last orders a product must appear in to count as a 'typical item' "
+        "(e.g. 0.5 = bought in at least half of them).",
+    )
+    reorder_parser.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        metavar="UAH",
+        help="Optional spend cap in UAH. If the typical-item total exceeds it, the least-frequently-bought "
+        "items are trimmed first until it fits. Omit to add everything and just report the total.",
     )
     reorder_parser.add_argument(
         "--optimize",
         choices=["promos"],
         default=None,
-        help="Opt-in promo optimization: swap for cheaper promo equivalents and apply bonuses/promo codes",
+        help="Opt-in only -- omitting this flag makes zero promo-related calls. "
+        "'promos' applies any available loyalty bonuses to the cart before checkout.",
     )
 
     args = parser.parse_args(argv)
