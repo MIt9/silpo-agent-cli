@@ -350,3 +350,42 @@ def test_no_cart_context_yet_skips_lookups_and_reports_unavailable_without_crash
     assert result.substitutions == []
     assert result.unavailable == ["milk"]
     assert client.calls == []
+
+
+def test_availability_check_uses_item_name_as_query_when_present():
+    """TypicalItem.name (added in issue #19) is a far better free-text
+    search query than a raw product_id/UUID -- used when present, matched
+    back to the item via the response's queries[].query, and falls back to
+    product_id only for items without a name (e.g. substitution results)."""
+    named_item = TypicalItem(product_id="sku-123", frequency=1.0, last_known_price=45.0, name="Молоко 2.5%")
+    unnamed_item = TypicalItem(product_id="bread", frequency=1.0, last_known_price=30.0)
+    client = FakeClient(
+        {
+            "silpo_find_products_batch": {
+                "success": True,
+                "queries": [
+                    {
+                        "query": "Молоко 2.5%",
+                        "totalFound": 1,
+                        "products": [
+                            {"id": "sku-123", "name": "Молоко 2.5%", "price": 45.0, "stock": 5, "available": True}
+                        ],
+                    },
+                    {
+                        "query": "bread",
+                        "totalFound": 1,
+                        "products": [{"id": "bread", "name": "bread", "price": 30.0, "stock": 5, "available": True}],
+                    },
+                ],
+            }
+        }
+    )
+    log_store = FakeLogStore()
+
+    result = resolve_substitutions(
+        client, log_store, [named_item, unnamed_item], CART_CONTEXT, print_fn=lambda *a: None
+    )
+
+    assert result.items == [named_item, unnamed_item]
+    find_call = next(c for c in client.calls if c[0] == "silpo_find_products_batch")
+    assert find_call[1]["products"] == ["Молоко 2.5%", "bread"]

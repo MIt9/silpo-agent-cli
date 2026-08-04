@@ -2,14 +2,17 @@
 PRD's module order: Address Resolver -> Cart Context Resolver -> Order
 Aggregator -> Substitution Resolver -> (optional) Promo Optimizer -> Cart
 Writer -> report. Cart Context Resolver resolves branchId/companyId/
-deliveryType/timeslot (see cart_context.py); Substitution Resolver consumes
-it as of issue #18 for its availability/replacement lookups. Promo Optimizer
-and Cart Writer don't consume it yet; that wiring lands in follow-up tickets
-(#19-#20). Cart Writer owns the non-empty cart guard (warn-and-proceed-or-abort)
-and the optional `--budget` trim; the CLI only parses `--budget` and reports
-the outcome. Promo Optimizer runs only when `--optimize promos` is passed --
-the module isn't even called otherwise, so a plain `reorder` makes zero
-promo-related MCP calls (CONTEXT.md's "Promo optimization" entry).
+deliveryType/timeslot/products (see cart_context.py); its `CartContext` is
+threaded through to both Substitution Resolver (issue #18, for its
+availability/replacement lookups) and Cart Writer (issue #19, as the source
+of truth for the non-empty-cart guard and the branch/company fallback on
+each add-to-cart item). Promo Optimizer doesn't consume it yet; that wiring
+lands in a follow-up ticket (#20). Cart Writer owns the non-empty cart guard
+(warn-and-proceed-or-abort) and the optional `--budget` trim; the CLI only
+parses `--budget` and reports the outcome. Promo Optimizer runs only when
+`--optimize promos` is passed -- the module isn't even called otherwise, so
+a plain `reorder` makes zero promo-related MCP calls (CONTEXT.md's "Promo
+optimization" entry).
 """
 
 import argparse
@@ -50,7 +53,7 @@ def _run_reorder(
         promo_result = optimize_promos(client, items)
         items = promo_result.items
 
-    report = write_cart(client, items, budget=budget)
+    report = write_cart(client, items, cart_context, budget=budget)
 
     if address:
         print(f"Delivering to: {address.label}")

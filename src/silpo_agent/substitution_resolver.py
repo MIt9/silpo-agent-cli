@@ -21,11 +21,12 @@ which every product-facing MCP tool below requires.
 Real schema (live-verified, see ../../docs/mcp_schema.md's "Product search /
 replacement tools" section):
 - No `silpo_check_availability` tool exists. Availability is checked via
-  `silpo_get_replacements({"branchId", "deliveryType", "timeslotStart",
+  `silpo_find_products_batch({"branchId", "deliveryType", "timeslotStart",
   "timeslotEnd", "products": [...], "limit"})` (NOTE: no `companyId` in this
   tool's schema), one batched call across all typical items, using each
-  item's `product_id` as the search query (TypicalItem carries no separate
-  name/slug -- see order_aggregator.py). Response:
+  item's `name` as the search query where available (falling back to
+  `product_id` for items without one, e.g. substitution/promo results --
+  see `_search_query`; `TypicalItem.name` was added in issue #19). Response:
   `{"queries": [{"query", "totalFound", "products": [...]}]}`; a product is
   considered available if the top result for its query has `available: True`
   and `stock > 0` (the real product-record shape:
@@ -77,12 +78,24 @@ def _to_item(candidate: dict, frequency: float, fallback_price: float) -> Typica
     )
 
 
+def _search_query(item: TypicalItem) -> str:
+    # A real product name (carried by TypicalItem as of issue #19) is a far
+    # better free-text search query than a raw product_id/UUID; fall back to
+    # product_id for items that don't have one (e.g. substitution/promo
+    # results, which don't carry a name through).
+    return item.name or item.product_id
+
+
 def _check_availability(client, items: list[TypicalItem], cart_context: CartContext) -> dict[str, bool]:
     """One batched `silpo_get_replacements`-adjacent availability lookup via
-    `silpo_find_products_batch`, keyed by each item's `product_id` used as
-    the search query. Returns {product_id: is_available}."""
+    `silpo_find_products_batch`, keyed by each item's search query (see
+    `_search_query`). Returns {product_id: is_available}."""
     if not items:
         return {}
+
+    query_to_ids: dict[str, list[str]] = {}
+    for item in items:
+        query_to_ids.setdefault(_search_query(item), []).append(item.product_id)
 
     response = (
         client.call(
@@ -92,7 +105,7 @@ def _check_availability(client, items: list[TypicalItem], cart_context: CartCont
                 "deliveryType": cart_context.delivery_type,
                 "timeslotStart": cart_context.timeslot_start,
                 "timeslotEnd": cart_context.timeslot_end,
-                "products": [item.product_id for item in items],
+                "products": list(query_to_ids),
                 "limit": 1,
             },
         )
@@ -101,10 +114,12 @@ def _check_availability(client, items: list[TypicalItem], cart_context: CartCont
 
     availability: dict[str, bool] = {}
     for query_result in response.get("queries") or []:
-        product_id = query_result.get("query")
+        query = query_result.get("query")
         products = query_result.get("products") or []
         top = products[0] if products else None
-        availability[product_id] = bool(top and top.get("available") and (top.get("stock") or 0) > 0)
+        is_available = bool(top and top.get("available") and (top.get("stock") or 0) > 0)
+        for product_id in query_to_ids.get(query, []):
+            availability[product_id] = is_available
     return availability
 
 

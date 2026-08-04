@@ -629,23 +629,21 @@ with the two real, live-verified tools documented above
 implementation are still assumptions, not confirmed live:
 
 - **Availability-check query term**: `silpo_find_products_batch`'s
-  `products` field is a list of free-text search queries, and `TypicalItem`
-  (from `order_aggregator.py`) carries only `product_id` — no separate name
-  or slug field. `_check_availability` in `substitution_resolver.py` uses
-  each item's `product_id` directly as its search query, and matches the
-  response's `queries[].query` back to the original id. This assumes a
-  product's real MCP-side id also works as a search query string and that
-  the top result for that query is the same product — reasonable given
-  what `TypicalItem` currently carries, but unconfirmed against a live
-  call. If it turns out `product_id` doesn't work as free-text search,
-  `silpo_get_product_details({"branchId", "slug", ...})` would be the
-  fallback, but that needs a `slug`, which would require Order Aggregator
-  (#16) to start carrying one — out of scope here. **Follow-up:** issue #19
-  (Cart Writer fix) is adding a `name` field to `TypicalItem` in parallel —
-  once that merges, `_check_availability` should search on `item.name`
-  instead of `item.product_id`, a materially better free-text query than a
-  raw id/UUID. Not implemented here to avoid a cross-branch dependency on
-  an in-progress ticket.
+  `products` field is a list of free-text search queries. Issue #19 (merged
+  into `main` mid-#18) added a `name` field to `TypicalItem`, so
+  `_check_availability`/`_search_query` in `substitution_resolver.py` now
+  search on `item.name` when present — a real product name is a materially
+  better free-text query than a raw id/UUID — falling back to
+  `item.product_id` only for items that don't carry a name (substitution and
+  promo results, which don't currently carry one through; see `_to_item` /
+  `promo_optimizer.py`). Still unconfirmed against a live call whether the
+  real search endpoint matches a `name`-as-written query back to the exact
+  same product (vs. a near-duplicate/variant) — `queries[].query` is matched
+  back to the original item(s) that used that exact query string, and the
+  *top* result for that query is trusted as the match. If that assumption
+  turns out wrong, `silpo_get_product_details({"branchId", "slug", ...})`
+  would be a more precise fallback, but that needs a `slug`, which no
+  `TypicalItem` currently carries.
 - **Populated `silpo_get_replacements` item shape (still genuinely
   unconfirmed)**: as noted above, a live call against real out-of-stock
   items returned an empty `items` array, so the shape of a populated entry

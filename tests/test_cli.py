@@ -81,8 +81,8 @@ def test_no_args_prints_help_and_exits_zero(capsys):
 
 def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
     orders = [
-        {"products": [{"id": "milk", "price": 45.0, "removed": False}]},
-        {"products": [{"id": "milk", "price": 44.0, "removed": False}]},
+        {"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]},
+        {"products": [{"id": "milk", "price": 44.0, "removed": False, "companyId": "c1", "branchId": "b1"}]},
     ]
     client = FakeClient(
         {
@@ -106,7 +106,19 @@ def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
     assert "Total: 45.00" in out
     assert (
         "silpo_add_or_update_cart_products",
-        {"items": [{"product_id": "milk", "quantity": 1}]},
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "milk",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+            ],
+        },
     ) in client.calls
     # Address Resolver runs ahead of Order Aggregator, per PRD pipeline order.
     tool_order = [tool for tool, _ in client.calls]
@@ -184,7 +196,19 @@ def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart
     assert tool_order.index("silpo_find_products_batch") < tool_order.index("silpo_add_or_update_cart_products")
     assert (
         "silpo_add_or_update_cart_products",
-        {"items": [{"product_id": "milk-oat", "quantity": 1}]},
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "milk-oat",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+            ],
+        },
     ) in client.calls
 
 
@@ -247,7 +271,19 @@ def test_reorder_reports_substitution_when_auto_applied(capsys, monkeypatch, tmp
     assert "Unavailable" not in out
     assert (
         "silpo_add_or_update_cart_products",
-        {"items": [{"product_id": "milk-oat", "quantity": 1}]},
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "milk-oat",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+            ],
+        },
     ) in client.calls
 
 
@@ -280,14 +316,22 @@ def test_reorder_non_empty_cart_warns_and_aborts_on_decline(capsys, monkeypatch,
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk"),
-            **_resolved_cart_context(),
-            # silpo_get_my_shopping_cart is called both by Cart Context
-            # Resolver (needs "shoppingCartId") and Cart Writer's non-empty
-            # cart guard (needs "items") -- the real tool only returns
-            # {"success", "shoppingCartId"} per docs/mcp_schema.md, so Cart
-            # Writer's own "items" assumption is a separate, pre-existing
-            # issue (tracked for #19); this fixture satisfies both readers.
-            "silpo_get_my_shopping_cart": {"shoppingCartId": "cart-1", "items": [{"product_id": "leftover"}]},
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": {
+                "success": True,
+                "cart": {
+                    "deliveryType": "DeliveryHome",
+                    "timeslot": {"start": None, "end": None},
+                    "shipments": [
+                        {
+                            "companyId": "c1",
+                            "branchId": "b1",
+                            "products": [{"productId": "leftover", "companyId": "c1", "branchId": "b1"}],
+                        }
+                    ],
+                    "calculation": {"validations": []},
+                },
+            },
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -307,7 +351,7 @@ def test_reorder_non_empty_cart_warns_and_aborts_on_decline(capsys, monkeypatch,
 
 
 def test_reorder_non_empty_cart_warns_and_proceeds_on_confirm(capsys, monkeypatch, tmp_path):
-    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
@@ -315,8 +359,22 @@ def test_reorder_non_empty_cart_warns_and_proceeds_on_confirm(capsys, monkeypatc
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk"),
-            **_resolved_cart_context(),
-            "silpo_get_my_shopping_cart": {"shoppingCartId": "cart-1", "items": [{"product_id": "leftover"}]},
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": {
+                "success": True,
+                "cart": {
+                    "deliveryType": "DeliveryHome",
+                    "timeslot": {"start": None, "end": None},
+                    "shipments": [
+                        {
+                            "companyId": "c1",
+                            "branchId": "b1",
+                            "products": [{"productId": "leftover", "companyId": "c1", "branchId": "b1"}],
+                        }
+                    ],
+                    "calculation": {"validations": []},
+                },
+            },
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -329,7 +387,19 @@ def test_reorder_non_empty_cart_warns_and_proceeds_on_confirm(capsys, monkeypatc
     assert "Added 1 item" in out
     assert (
         "silpo_add_or_update_cart_products",
-        {"items": [{"product_id": "milk", "quantity": 1}]},
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "milk",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+            ],
+        },
     ) in client.calls
 
 
@@ -337,18 +407,18 @@ def test_reorder_budget_trims_lowest_priority_items_and_reports_them(capsys, mon
     orders = [
         {
             "products": [
-                {"id": "milk", "price": 45.0, "removed": False},
-                {"id": "bread", "price": 30.0, "removed": False},
-                {"id": "chips", "price": 25.0, "removed": False},
+                {"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"},
+                {"id": "bread", "price": 30.0, "removed": False, "companyId": "c1", "branchId": "b1"},
+                {"id": "chips", "price": 25.0, "removed": False, "companyId": "c1", "branchId": "b1"},
             ]
         },
         {
             "products": [
-                {"id": "milk", "price": 45.0, "removed": False},
-                {"id": "bread", "price": 30.0, "removed": False},
+                {"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"},
+                {"id": "bread", "price": 30.0, "removed": False, "companyId": "c1", "branchId": "b1"},
             ]
         },
-        {"products": [{"id": "milk", "price": 45.0, "removed": False}]},
+        {"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]},
     ]
     client = FakeClient(
         {
@@ -375,10 +445,25 @@ def test_reorder_budget_trims_lowest_priority_items_and_reports_them(capsys, mon
     assert (
         "silpo_add_or_update_cart_products",
         {
-            "items": [
-                {"product_id": "milk", "quantity": 1},
-                {"product_id": "bread", "quantity": 1},
-            ]
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "milk",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                },
+                {
+                    "productId": "bread",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                },
+            ],
         },
     ) in client.calls
 
@@ -440,7 +525,7 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
     "Promo optimization" entry / issue #7 acceptance criteria) -- no
     promo-equivalent lookup, no bonus lookup, no cart-wide update call.
     """
-    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
     client = FakeClient(
         {
             "silpo_get_my_online_orders": orders,
@@ -463,7 +548,19 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
     assert "bonus" not in out.lower()
     assert (
         "silpo_add_or_update_cart_products",
-        {"items": [{"product_id": "milk", "quantity": 1}]},
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "milk",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+            ],
+        },
     ) in client.calls
 
 
@@ -497,7 +594,19 @@ def test_reorder_optimize_promos_swaps_item_and_applies_bonuses(capsys, monkeypa
     assert "Total: 40.00" in out
     assert (
         "silpo_add_or_update_cart_products",
-        {"items": [{"product_id": "milk-promo", "quantity": 1}]},
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "milk-promo",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+            ],
+        },
     ) in client.calls
     assert ("silpo_update_shopping_cart", {"bonus_ids": ["bonus-1"]}) in client.calls
     # Promo Optimizer runs between Substitution Resolver and Cart Writer.
