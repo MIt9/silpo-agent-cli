@@ -28,6 +28,7 @@ def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
             "silpo_get_my_delivery_addresses": [
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
             ],
+            "silpo_check_availability": {"available": True},
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -49,6 +50,87 @@ def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
     assert tool_order.index("silpo_get_my_delivery_addresses") < tool_order.index("silpo_get_my_online_orders")
     # Confirmed address is written to the Reorder Log for audit.
     assert log_store.read_history()[0]["address"] == "Kyiv, Some St 1"
+
+
+def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart_writer(monkeypatch, tmp_path):
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": False},
+            "silpo_get_replacements": [{"product_id": "milk-oat", "price": 50.0}],
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    assert exit_code == 0
+    tool_order = [tool for tool, _ in client.calls]
+    assert tool_order.index("silpo_get_my_online_orders") < tool_order.index("silpo_check_availability")
+    assert tool_order.index("silpo_check_availability") < tool_order.index("silpo_add_or_update_cart_products")
+    assert (
+        "silpo_add_or_update_cart_products",
+        {"items": [{"product_id": "milk-oat", "quantity": 1}]},
+    ) in client.calls
+
+
+def test_reorder_reports_unavailable_items(capsys, monkeypatch, tmp_path):
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}, {"product_id": "eggs", "price": 60.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": False},
+            "silpo_get_replacements": [],
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Unavailable" in out
+    assert "milk" in out and "eggs" in out
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_reorder_reports_substitution_when_auto_applied(capsys, monkeypatch, tmp_path):
+    """A 1-candidate auto-substitution must actually show up in the printed
+    report, not just get silently added to the cart under its replacement id.
+    """
+    orders = [{"items": [{"product_id": "milk", "price": 45.0}]}]
+    client = FakeClient(
+        {
+            "silpo_get_my_online_orders": orders,
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1"}
+            ],
+            "silpo_check_availability": {"available": False},
+            "silpo_get_replacements": [{"product_id": "milk-oat", "price": 50.0}],
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Substituted milk -> milk-oat" in out
+    assert "Unavailable" not in out
+    assert (
+        "silpo_add_or_update_cart_products",
+        {"items": [{"product_id": "milk-oat", "quantity": 1}]},
+    ) in client.calls
 
 
 def test_reorder_with_insufficient_orders_errors_without_touching_cart(capsys, monkeypatch, tmp_path):

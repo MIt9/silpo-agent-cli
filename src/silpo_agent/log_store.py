@@ -3,7 +3,9 @@ plus Substitution Memory (item -> chosen replacement). Read/write only, no
 business logic.
 """
 
+import fcntl
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 DEFAULT_PATH = Path.home() / ".silpo-agent" / "reorder_log.json"
@@ -14,6 +16,26 @@ _EMPTY = {"runs": [], "substitutions": {}}
 class ReorderLogStore:
     def __init__(self, path: Path | None = None):
         self.path = path or DEFAULT_PATH
+
+    @contextmanager
+    def _locked(self):
+        # ponytail: advisory file lock (fcntl, POSIX-only) around each
+        # load-mutate-save, not a cross-platform lock library — fine for
+        # this single-machine personal CLI. A single `reorder` run can now
+        # call append_run (address audit) and set_substitution (once per
+        # freshly-chosen replacement) multiple times; the lock serializes
+        # each call's load+save into one critical section so a later call
+        # can never load a stale copy and clobber an earlier call's save.
+        # Swap for `filelock` (already-installed-dependency rung) if this
+        # ever needs to run on Windows.
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        with open(lock_path, "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
     def _load(self) -> dict:
         try:
@@ -33,26 +55,19 @@ class ReorderLogStore:
         self.path.write_text(json.dumps(data, indent=2))
 
     def append_run(self, run: dict) -> None:
-        # ponytail: load-mutate-save, not atomic — two append_run calls in
-        # close succession (e.g. within one `reorder` run) can race, the
-        # second's _load happening before the first's _save lands, losing
-        # a write. Fine today: the only caller is
-        # address_resolver.resolve_address, once per `reorder` run (via
-        # cli.py). If a future ticket adds a second append_run per run
-        # (e.g. a full run record alongside this address audit record),
-        # merge both into a single append_run call here instead of adding
-        # file locking.
-        data = self._load()
-        data["runs"].append(run)
-        self._save(data)
+        with self._locked():
+            data = self._load()
+            data["runs"].append(run)
+            self._save(data)
 
     def read_history(self) -> list[dict]:
         return self._load()["runs"]
 
     def set_substitution(self, item_id: str, replacement_id: str) -> None:
-        data = self._load()
-        data["substitutions"][item_id] = replacement_id
-        self._save(data)
+        with self._locked():
+            data = self._load()
+            data["substitutions"][item_id] = replacement_id
+            self._save(data)
 
     def get_substitution(self, item_id: str) -> str | None:
         return self._load()["substitutions"].get(item_id)
