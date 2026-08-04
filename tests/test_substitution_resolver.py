@@ -324,3 +324,29 @@ def test_no_unavailable_items_skips_replacements_call_entirely():
 
     assert result.items == [item]
     assert all(call[0] != "silpo_get_replacements" for call in client.calls)
+
+
+def test_no_cart_context_yet_skips_lookups_and_reports_unavailable_without_crashing():
+    """resolve_cart_context returns an all-None CartContext on a first-ever
+    run or a cleared cart (see cart_context.py). Sending None branchId/
+    companyId/etc. to the real MCP tools would fail -- both lookups must be
+    skipped entirely, with items reported unavailable rather than a crash."""
+    no_cart_context = CartContext(
+        shopping_cart_id=None,
+        branch_id=None,
+        company_id=None,
+        delivery_type=None,
+        timeslot_start=None,
+        timeslot_end=None,
+        validations=[],
+    )
+    item = TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0)
+    client = FakeClient({})
+    log_store = FakeLogStore()
+
+    result = resolve_substitutions(client, log_store, [item], no_cart_context, print_fn=lambda *a: None)
+
+    assert result.items == []
+    assert result.substitutions == []
+    assert result.unavailable == ["milk"]
+    assert client.calls == []

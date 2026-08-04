@@ -45,6 +45,25 @@ def _replacements(**product_to_candidates):
     }
 
 
+def _resolved_cart_context():
+    """A resolved (non-None branchId/companyId) CartContext's underlying
+    tool responses -- resolve_substitutions now skips its MCP calls entirely
+    when these are unresolved (all-None), so every test exercising
+    Substitution Resolver behavior needs a real cart context."""
+    return {
+        "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+        "silpo_get_shopping_cart_by_id": {
+            "success": True,
+            "cart": {
+                "deliveryType": "DeliveryHome",
+                "timeslot": {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"},
+                "shipments": [{"companyId": "c1", "branchId": "b1", "products": []}],
+                "calculation": {"validations": []},
+            },
+        },
+    }
+
+
 class FakeClient:
     def __init__(self, responses):
         self.responses = responses
@@ -72,6 +91,7 @@ def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk"),
+            **_resolved_cart_context(),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -150,6 +170,7 @@ def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart
             ],
             "silpo_find_products_batch": _unavailable_batch("milk"),
             "silpo_get_replacements": _replacements(milk=[{"id": "milk-oat", "price": 50.0}]),
+            **_resolved_cart_context(),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -184,6 +205,7 @@ def test_reorder_reports_unavailable_items(capsys, monkeypatch, tmp_path):
             ],
             "silpo_find_products_batch": _unavailable_batch("milk", "eggs"),
             "silpo_get_replacements": _replacements(),
+            **_resolved_cart_context(),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -211,6 +233,7 @@ def test_reorder_reports_substitution_when_auto_applied(capsys, monkeypatch, tmp
             ],
             "silpo_find_products_batch": _unavailable_batch("milk"),
             "silpo_get_replacements": _replacements(milk=[{"id": "milk-oat", "price": 50.0}]),
+            **_resolved_cart_context(),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -257,7 +280,14 @@ def test_reorder_non_empty_cart_warns_and_aborts_on_decline(capsys, monkeypatch,
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk"),
-            "silpo_get_my_shopping_cart": {"items": [{"product_id": "leftover"}]},
+            **_resolved_cart_context(),
+            # silpo_get_my_shopping_cart is called both by Cart Context
+            # Resolver (needs "shoppingCartId") and Cart Writer's non-empty
+            # cart guard (needs "items") -- the real tool only returns
+            # {"success", "shoppingCartId"} per docs/mcp_schema.md, so Cart
+            # Writer's own "items" assumption is a separate, pre-existing
+            # issue (tracked for #19); this fixture satisfies both readers.
+            "silpo_get_my_shopping_cart": {"shoppingCartId": "cart-1", "items": [{"product_id": "leftover"}]},
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -285,7 +315,8 @@ def test_reorder_non_empty_cart_warns_and_proceeds_on_confirm(capsys, monkeypatc
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk"),
-            "silpo_get_my_shopping_cart": {"items": [{"product_id": "leftover"}]},
+            **_resolved_cart_context(),
+            "silpo_get_my_shopping_cart": {"shoppingCartId": "cart-1", "items": [{"product_id": "leftover"}]},
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -326,6 +357,7 @@ def test_reorder_budget_trims_lowest_priority_items_and_reports_them(capsys, mon
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk", "bread", "chips"),
+            **_resolved_cart_context(),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -367,6 +399,7 @@ def test_reorder_without_budget_never_trims_and_reports_actual_total(capsys, mon
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk", "bread"),
+            **_resolved_cart_context(),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -415,6 +448,7 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
                 {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
             ],
             "silpo_find_products_batch": _available_batch("milk"),
+            **_resolved_cart_context(),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -444,6 +478,7 @@ def test_reorder_optimize_promos_swaps_item_and_applies_bonuses(capsys, monkeypa
             "silpo_find_products_batch": _available_batch("milk"),
             "silpo_get_promo_equivalent": {"product_id": "milk-promo", "price": 40.0},
             "silpo_get_available_bonuses": [{"id": "bonus-1"}],
+            **_resolved_cart_context(),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")

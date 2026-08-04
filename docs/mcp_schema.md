@@ -640,7 +640,12 @@ implementation are still assumptions, not confirmed live:
   call. If it turns out `product_id` doesn't work as free-text search,
   `silpo_get_product_details({"branchId", "slug", ...})` would be the
   fallback, but that needs a `slug`, which would require Order Aggregator
-  (#16) to start carrying one — out of scope here.
+  (#16) to start carrying one — out of scope here. **Follow-up:** issue #19
+  (Cart Writer fix) is adding a `name` field to `TypicalItem` in parallel —
+  once that merges, `_check_availability` should search on `item.name`
+  instead of `item.product_id`, a materially better free-text query than a
+  raw id/UUID. Not implemented here to avoid a cross-branch dependency on
+  an in-progress ticket.
 - **Populated `silpo_get_replacements` item shape (still genuinely
   unconfirmed)**: as noted above, a live call against real out-of-stock
   items returned an empty `items` array, so the shape of a populated entry
@@ -668,3 +673,16 @@ implementation are still assumptions, not confirmed live:
   unavailable) rather than one call per item, per the ticket's real batch
   shape. The per-item substitution *decision* logic (0/1/>1 candidates,
   Substitution Memory reuse) is unchanged from issue #5.
+- **No-cart-context guard**: `resolve_cart_context` returns an all-`None`
+  `CartContext` when the user has no shopping cart yet (a real, normal state
+  — first-ever run, or a cleared cart), not an error. `resolve_substitutions`
+  guards on `cart_context.branch_id`/`.company_id` being `None` and skips
+  both MCP calls entirely in that case (reporting every item unavailable)
+  rather than sending `None` fields to the real API. Found in code review of
+  the initial #18 PR, before it reached `main`.
+- **Candidate id key fallback**: since the populated `silpo_get_replacements`
+  item shape is unconfirmed (see above), candidate id lookups try `"id"`
+  first (the general product-record shape) and fall back to `"productId"`
+  (the key used by confirmed cart/order product shapes elsewhere in this
+  codebase) rather than hard-failing with a `KeyError` if the real shape
+  turns out to differ.

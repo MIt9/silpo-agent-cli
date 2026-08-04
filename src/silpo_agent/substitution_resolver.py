@@ -39,7 +39,14 @@ replacement tools" section):
   entry looks like `{"productId": <original id>, "replacements": [<product
   record>, ...]}`, normalizing a single dict to a one-item list the same way
   `address_resolver.py` handles `silpo_find_address`. This is a documented
-  guess, not a verified shape -- see docs/mcp_schema.md.
+  guess, not a verified shape -- see docs/mcp_schema.md. Candidate id lookups
+  read `"id"` first, falling back to `"productId"`, for the same reason.
+
+If `cart_context.branch_id`/`.company_id` are `None` (no cart resolved yet --
+`resolve_cart_context` returns an all-None `CartContext` on a first-ever run
+or cleared cart, see cart_context.py), both MCP calls are skipped entirely
+and every item is reported unavailable rather than sending `None` fields to
+the real API.
 """
 
 from dataclasses import dataclass
@@ -55,9 +62,16 @@ class SubstitutionResult:
     unavailable: list[str]
 
 
+def _candidate_id(candidate: dict) -> str | None:
+    # "id" matches the general product-record shape used elsewhere; "productId"
+    # is a defensive fallback since the populated silpo_get_replacements item
+    # shape is still unconfirmed live (see module docstring).
+    return candidate.get("id") or candidate.get("productId")
+
+
 def _to_item(candidate: dict, frequency: float, fallback_price: float) -> TypicalItem:
     return TypicalItem(
-        product_id=candidate["id"],
+        product_id=_candidate_id(candidate),
         frequency=frequency,
         last_known_price=candidate.get("price", fallback_price),
     )
@@ -135,13 +149,13 @@ def _resolve_one(
 
     remembered_id = log_store.get_substitution(item.product_id)
     if remembered_id is not None:
-        match = next((c for c in candidates if c.get("id") == remembered_id), None)
+        match = next((c for c in candidates if _candidate_id(c) == remembered_id), None)
         price = match.get("price", item.last_known_price) if match else item.last_known_price
         return TypicalItem(product_id=remembered_id, frequency=item.frequency, last_known_price=price), item.product_id
 
     print_fn(f"{item.product_id} is unavailable. Choose a replacement:")
     for i, candidate in enumerate(candidates, start=1):
-        print_fn(f"{i}. {candidate.get('id')}")
+        print_fn(f"{i}. {_candidate_id(candidate)}")
     choice = input_fn("Pick a number: ").strip()
     idx = int(choice) if choice.isdigit() else None
     if not idx or not (1 <= idx <= len(candidates)):
@@ -149,7 +163,7 @@ def _resolve_one(
         return None, None
 
     chosen = candidates[idx - 1]
-    log_store.set_substitution(item.product_id, chosen["id"])
+    log_store.set_substitution(item.product_id, _candidate_id(chosen))
     return _to_item(chosen, item.frequency, item.last_known_price), item.product_id
 
 
@@ -164,6 +178,17 @@ def resolve_substitutions(
 ) -> SubstitutionResult:
     input_fn = input_fn or input
     print_fn = print_fn or print
+
+    if not cart_context.branch_id or not cart_context.company_id:
+        # No cart context resolved yet (first-ever run, or a cleared cart --
+        # resolve_cart_context returns an all-None CartContext in that case,
+        # see cart_context.py). Both silpo_find_products_batch and
+        # silpo_get_replacements require branchId/companyId; sending None
+        # would fail against the real API. Skip both lookups and report every
+        # item unavailable rather than crashing.
+        return SubstitutionResult(
+            items=[], substitutions=[], unavailable=[item.product_id for item in typical_items]
+        )
 
     availability = _check_availability(client, typical_items, cart_context)
     unavailable_items = [item for item in typical_items if not availability.get(item.product_id)]
