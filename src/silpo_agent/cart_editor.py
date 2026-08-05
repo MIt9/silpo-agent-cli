@@ -169,6 +169,14 @@ def swap_cart_item(client, cart_context: CartContext, old_slug: str, new_product
     If the add call fails after the remove already succeeded, attempts a
     best-effort rollback (re-adding the old item) and always raises
     `CartEditError` describing what happened -- see module docstring."""
+    # A missing slug must never reach the match: `_find_cart_product`
+    # compares `p.get("slug") == slug`, so `None` would match the first
+    # slug-less cart line and silently swap the wrong item. Guarded here
+    # rather than in each caller -- both the interactive flow and
+    # `--replace` route through this function.
+    if not old_slug:
+        raise CartEditError("That cart item has no slug, so it can't be addressed for replacement.")
+
     old_item = _find_cart_product(cart_context, old_slug)
     if old_item is None:
         raise CartEditError(f"{old_slug!r} is not in your cart.")

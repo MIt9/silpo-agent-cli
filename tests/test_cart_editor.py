@@ -155,6 +155,27 @@ def test_swap_cart_item_takes_a_slug_and_removes_by_the_lines_product_id():
     ) in client.calls
 
 
+def test_swap_cart_item_refuses_a_missing_slug_instead_of_matching_a_slugless_line():
+    """A cart line without a slug can't be addressed. Without this guard
+    `_find_cart_product` would match `p.get("slug") == None` and silently
+    swap whichever slug-less line happens to come first -- the wrong item."""
+    context = cart_context(
+        products=[
+            {"productId": "no-slug-1", "companyId": "c1", "branchId": "b1", "quantity": 1},
+            {"productId": "no-slug-2", "companyId": "c1", "branchId": "b1", "quantity": 1},
+        ]
+    )
+    client = FakeClient()
+
+    try:
+        swap_cart_item(client, context, None, {"id": "x", "slug": "x", "price": 1.0})
+        assert False, "expected CartEditError"
+    except CartEditError as exc:
+        assert "slug" in str(exc).lower()
+
+    assert client.calls == []
+
+
 def test_swap_cart_item_unknown_slug_raises_before_any_call():
     context = cart_context(products=[{"productId": "p1", "slug": "bread", "companyId": "c1", "quantity": 1}])
     client = FakeClient()

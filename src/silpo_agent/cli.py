@@ -205,7 +205,9 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
     except CartEditError as exc:
         print_fn(f"cart edit: {exc}")
         return 1
-    print_fn(f"Replaced {result.removed_slug} with {result.added_slug} ({result.added_price:.2f})")
+    # Free-text search results aren't guaranteed to carry a slug, so fall
+    # back to the label already shown to the user rather than printing "None".
+    print_fn(f"Replaced {result.removed_slug} with {result.added_slug or new_label} ({result.added_price:.2f})")
     return 0
 
 

@@ -396,6 +396,56 @@ def test_cart_edit_interactive_promo_browse_invalid_pick_errors_without_mutating
     assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
 
 
+def test_cart_edit_interactive_slugless_item_errors_without_mutating(capsys, tmp_path):
+    """A cart line with no slug can't be addressed for replacement -- it must
+    error clearly, not silently swap whichever other slug-less line matched
+    first."""
+    products = [
+        {"productId": "no-slug-1", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"},
+        {"productId": "no-slug-2", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Хліб"},
+    ]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_find_products_batch": _batch(
+                "oat milk", [{"id": "oat-milk", "slug": "oat-milk", "name": "Oat Milk", "price": 55.0}]
+            ),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    answers = iter(["1", "1", "oat milk", "1", "y"])
+
+    exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": next(answers))
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "slug" in out.lower()
+    assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_cart_edit_reports_the_shown_label_when_the_replacement_has_no_slug(capsys, tmp_path):
+    """Free-text search results aren't guaranteed to carry a slug -- the
+    confirmation line falls back to the name already shown rather than
+    printing "None"."""
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_find_products_batch": _batch("oat milk", [{"id": "oat-milk", "name": "Oat Milk", "price": 55.0}]),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    answers = iter(["1", "1", "oat milk", "1", "y"])
+
+    exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": next(answers))
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Replaced milk with Oat Milk" in out
+    assert "None" not in out
+
+
 def test_cart_edit_empty_cart_reports_and_exits_zero(capsys, tmp_path):
     client = FakeClient(_resolved_cart_context_with_products([]))
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
