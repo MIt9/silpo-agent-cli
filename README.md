@@ -140,12 +140,16 @@ uv run pytest
   is unclear.
 - `prd_reorder_optimizer.md`, `prd_cart_and_deals.md`,
   `prd_delivery_context_coupons.md` — the three PRDs this project was built
-  from, in order.
+  from, in order. Kept as the record of *why* things work the way they do
+  (module boundaries, rejected approaches, implementation decisions) — not
+  duplicated in CONTEXT.md (glossary only) or docs/mcp_schema.md (schema
+  only).
 - `docs/mcp_schema.md` — live-verified schema notes for every Silpo MCP
   tool this project touches, including known gaps, assumptions, and every
   place a guessed schema turned out wrong once tested live.
-- `TODO.md` — module-by-module build status.
-- `idea.md` — the original brainstorm this project narrowed down from.
+- Build status lives in the repo's GitHub issues (`MIt9/silpo-agent-cli`),
+  not a local TODO file — every ticket that shipped is closed there, with
+  the PR that implemented it linked.
 
 ## Known limitations
 

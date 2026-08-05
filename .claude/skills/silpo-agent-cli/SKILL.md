@@ -25,7 +25,9 @@ covers day-to-day usage of the finished `reorder` command.
   Every confirmed real schema and every remaining known gap/assumption is
   recorded here, dated, per-issue. Check it before assuming a tool's
   request/response shape — don't re-guess something already answered here.
-- `TODO.md` — which modules are done, and against which issue numbers.
+- Build status lives in the repo's GitHub issues (`MIt9/silpo-agent-cli`),
+  not a local TODO file — `gh issue list --repo MIt9/silpo-agent-cli` shows
+  what's open/closed and which PR closed each one.
 
 ## Workflow this repo uses for new work
 
@@ -53,8 +55,7 @@ covers day-to-day usage of the finished `reorder` command.
    merge, delete the branch. Don't merge with unresolved review findings or
    a `CONFLICTING` merge state — rebase/resolve first.
 5. After merging a module that changes MCP tool call shapes, update
-   `docs/mcp_schema.md` with what was verified/assumed, and `TODO.md`'s
-   checkbox for that module.
+   `docs/mcp_schema.md` with what was verified/assumed.
 
 ## Live testing gotchas already solved once — don't rediscover them
 
