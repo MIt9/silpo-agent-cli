@@ -1,9 +1,18 @@
 # silpo-agent-cli
 
-Personal CLI wrapper over the Silpo MCP server (`https://mcp.silpo.ua/mcp`)
-for grocery shopping: rebuild your cart from what you typically buy, check
-and edit what's actually in it, and see what's on sale — without leaving
-the terminal.
+CLI wrapper over the Silpo MCP server (`https://mcp.silpo.ua/mcp`) for
+grocery shopping: rebuild your cart from what you typically buy, check and
+edit what's actually in it, and see what's on sale — without leaving the
+terminal.
+
+**Primary use case: pair it with an AI agent.** This is a plain,
+scriptable CLI on purpose — every command has a stable `--help`, flags do
+one thing, and output carries the product slugs needed for follow-up calls.
+Point an agent (e.g. Claude Code) at `.claude/skills/silpo-cli-usage/` and
+it can turn "reorder my usual groceries, budget 1500" into the right
+invocation, read the result, and handle prompts — you don't have to
+memorize flags or babysit the terminal yourself. See
+[Claude Code skills](#claude-code-skills) below.
 
 ## Setup
 
@@ -120,17 +129,19 @@ token or your real Silpo cart.
 
 ## Claude Code skills
 
-Two skills exist if you drive this tool through Claude Code:
-
-- `~/.agents/skills/silpo-agent/` (personal, cross-project) — teaches Claude
-  how to translate a request like "reorder my usual groceries, budget 1500"
-  or "what's in my cart" into the right invocation, and about this tool's
-  quirks (interactive prompts, cart-only scope in `reorder`, where local
-  history lives).
+- `.claude/skills/silpo-cli-usage/` (this repo) — **the intended way to
+  drive this tool day to day.** Mirrors every command's `--help` output so
+  an agent can turn a plain-language ask ("reorder my usual groceries,
+  budget 1500", "what's in my cart", "swap the milk for something on
+  promo") into the right invocation, handle the interactive prompts, and
+  know this tool's quirks (cart-only scope in `reorder`, slugs vs. product
+  names, where local history lives). Ships portable — no machine-specific
+  paths — so it works from wherever you clone this repo.
 - `.claude/skills/silpo-agent-cli/` (this repo) — dev-workflow conventions
-  for *building* this CLI: TDD-first, ticket/review conventions, and the
-  live-schema gotchas already hit once (OAuth redirect_uri, MCP response
-  envelope unwrapping, wrapped vs. bare API responses).
+  for *building* this CLI instead: TDD-first, ticket/review conventions,
+  and the live-schema gotchas already hit once (OAuth redirect_uri, MCP
+  response envelope unwrapping, wrapped vs. bare API responses). Only
+  relevant if you're extending the tool itself.
 
 ## Local state
 
@@ -183,3 +194,7 @@ uv run pytest
   branch nationwide (true for every account tested so far); if that's ever
   false for an account, the first one found is used, with a printed note
   rather than a picker.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

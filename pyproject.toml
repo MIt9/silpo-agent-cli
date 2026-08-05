@@ -3,8 +3,9 @@ name = "silpo-agent-cli"
 version = "0.1.0"
 description = "Personal CLI wrapper over the Silpo MCP server"
 readme = "README.md"
+license = "MIT"
 authors = [
-    { name = "d.bilukcha", email = "d.bilukha@foodtech.team" }
+    { name = "d.bilukcha", email = "siniidrozd@gmail.com" }
 ]
 requires-python = ">=3.11"
 dependencies = [
