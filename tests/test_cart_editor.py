@@ -5,6 +5,7 @@ from silpo_agent.cart_editor import (
     add_cart_item,
     resolve_product_by_slug,
     search_replacement_candidates,
+    set_cart_item_quantity,
     swap_cart_item,
 )
 
@@ -378,6 +379,75 @@ def test_add_cart_item_without_id_raises_and_makes_no_calls():
         pass
 
     assert client.calls == []
+
+
+# --- set_cart_item_quantity --------------------------------------------
+
+
+def test_set_cart_item_quantity_unknown_slug_raises_and_makes_no_calls():
+    context = cart_context(products=[{"productId": "bread", "slug": "bread", "companyId": "c1", "quantity": 1}])
+    client = FakeClient()
+
+    try:
+        set_cart_item_quantity(client, context, "milk", 3)
+        assert False, "expected CartEditError"
+    except CartEditError as exc:
+        assert "milk" in str(exc)
+
+    assert client.calls == []
+
+
+def test_set_cart_item_quantity_sets_the_absolute_value_not_a_delta():
+    """`addQuantity: True` adds to the existing line quantity (per
+    cart_writer.py's own doc note) -- --qty needs "set to N", the opposite,
+    so this must send `addQuantity: False`."""
+    context = cart_context(
+        products=[
+            {"productId": "milk-id", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "price": 49.9}
+        ]
+    )
+    client = FakeClient()
+
+    result = set_cart_item_quantity(client, context, "milk", 3)
+
+    assert (
+        "silpo_add_or_update_cart_products",
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "milk-id",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 3,
+                    "addQuantity": False,
+                }
+            ],
+        },
+    ) in client.calls
+    assert result.old_quantity == 1
+    assert result.new_quantity == 3
+    assert result.added_price == 49.9
+    assert result.added_slug == "milk"
+    assert result.removed_slug is None
+
+
+def test_set_cart_item_quantity_accepts_fractional_values_for_weighted_items():
+    """Issue 01 (blocker): weighted items (meat, produce sold by kg) need
+    quantities like 0.5 or 1.5, not just whole packs."""
+    context = cart_context(
+        products=[
+            {"productId": "gulyash-id", "slug": "gulyash", "companyId": "c1", "branchId": "b1", "quantity": 1.5, "price": 320.0}
+        ]
+    )
+    client = FakeClient()
+
+    result = set_cart_item_quantity(client, context, "gulyash", 0.5)
+
+    added_call = next(c for c in client.calls if c[0] == "silpo_add_or_update_cart_products")
+    assert added_call[1]["products"][0]["quantity"] == 0.5
+    assert result.old_quantity == 1.5
+    assert result.new_quantity == 0.5
 
 
 # --- search_replacement_candidates -------------------------------------

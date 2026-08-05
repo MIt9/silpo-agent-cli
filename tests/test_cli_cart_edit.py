@@ -639,4 +639,90 @@ def test_cart_edit_empty_cart_reports_and_exits_zero(capsys, tmp_path):
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "empty" in out.lower()
+
+
+# --- --qty ---------------------------------------------------------------
+
+
+def test_cart_edit_qty_flag_sets_absolute_quantity_with_zero_prompts(capsys, tmp_path):
+    products = [{"productId": "milk-id", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "price": 49.9}]
+    client = FakeClient(_resolved_cart_context_with_products(products))
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    def input_fn(prompt=""):
+        raise AssertionError("--qty must not prompt")
+
+    exit_code = main(["cart", "edit", "--qty", "milk", "3"], client=client, log_store=log_store, input_fn=input_fn)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "milk" in out
+    assert "1" in out and "3" in out
+    added_call = next(c for c in client.calls if c[0] == "silpo_add_or_update_cart_products")
+    assert added_call[1]["products"][0]["productId"] == "milk-id"
+    assert added_call[1]["products"][0]["quantity"] == 3
+    assert added_call[1]["products"][0]["addQuantity"] is False
+    assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)
+
+
+def test_cart_edit_qty_flag_unknown_slug_errors_without_mutating(capsys, tmp_path):
+    products = [{"productId": "milk-id", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "price": 49.9}]
+    client = FakeClient(_resolved_cart_context_with_products(products))
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["cart", "edit", "--qty", "bread", "2"],
+        client=client,
+        log_store=log_store,
+        input_fn=lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "bread" in out
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+    assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)
+
+
+def test_cart_edit_qty_flag_accepts_fractional_values_for_weighted_items(capsys, tmp_path):
+    """Issue 01 (blocker): weighted items (meat, produce sold by kg) need
+    quantities like 0.5, not just whole packs."""
+    products = [
+        {"productId": "gulyash-id", "slug": "gulyash", "companyId": "c1", "branchId": "b1", "quantity": 1.5, "price": 320.0}
+    ]
+    client = FakeClient(_resolved_cart_context_with_products(products))
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["cart", "edit", "--qty", "gulyash", "0.5"],
+        client=client,
+        log_store=log_store,
+        input_fn=lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "1.5" in out
+    assert "0.5" in out
+    assert "160.00" in out  # 320.0 * 0.5
+    added_call = next(c for c in client.calls if c[0] == "silpo_add_or_update_cart_products")
+    assert added_call[1]["products"][0]["quantity"] == 0.5
+
+
+def test_cart_edit_qty_flag_non_numeric_value_errors_cleanly_without_mutating(capsys, tmp_path):
+    products = [{"productId": "milk-id", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "price": 49.9}]
+    client = FakeClient(_resolved_cart_context_with_products(products))
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["cart", "edit", "--qty", "milk", "abc"],
+        client=client,
+        log_store=log_store,
+        input_fn=lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "--qty" in out
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
     assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)

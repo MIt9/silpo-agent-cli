@@ -27,6 +27,7 @@ from silpo_agent.cart_editor import (
     CartEditError,
     resolve_product_by_slug,
     search_replacement_candidates,
+    set_cart_item_quantity,
     swap_cart_item,
 )
 from silpo_agent.cart_viewer import format_cart
@@ -141,6 +142,32 @@ def _run_cart_edit_add(client, cart_context, new_slug, print_fn, quantity: float
     return 0
 
 
+def _run_cart_edit_qty(client, cart_context, slug, quantity_str: str, print_fn) -> int:
+    """Non-interactive: sets SLUG's existing cart line quantity to the
+    absolute value NUM (a set, not a delta -- unlike --add's addQuantity=True
+    mechanism), zero prompts. Errors (no MCP mutation made) if NUM isn't a
+    positive number, or if SLUG isn't already a line in the cart -- see
+    set_cart_item_quantity."""
+    try:
+        quantity = float(quantity_str)
+    except ValueError:
+        print_fn(f"cart edit: --qty quantity must be a number, got {quantity_str!r}")
+        return 1
+    if quantity <= 0:
+        print_fn(f"cart edit: --qty quantity must be a positive number, got {quantity}")
+        return 1
+    try:
+        result = set_cart_item_quantity(client, cart_context, slug, quantity)
+    except CartEditError as exc:
+        print_fn(f"cart edit: {exc}")
+        return 1
+    old_display = int(result.old_quantity) if result.old_quantity == int(result.old_quantity) else result.old_quantity
+    new_display = int(result.new_quantity) if result.new_quantity == int(result.new_quantity) else result.new_quantity
+    line_total = result.added_price * result.new_quantity
+    print_fn(f"{result.added_slug}: {old_display} -> {new_display} ({line_total:.2f})")
+    return 0
+
+
 def _pick_free_text_replacement(client, cart_context, input_fn, print_fn) -> dict | None:
     """Free-text search path (issue #30): prompts for search terms, shows
     matching candidates, lets the user pick one. Returns the chosen product
@@ -237,7 +264,14 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
 
 
 def _run_cart_edit(
-    client, log_store, input_fn, print_fn, replace: list[str] | None, add: str | None = None, quantity: float = 1
+    client,
+    log_store,
+    input_fn,
+    print_fn,
+    replace: list[str] | None,
+    add: str | None = None,
+    quantity: float = 1,
+    qty: list[str] | None = None,
 ) -> int:
     cart_context = resolve_cart_context(client, input_fn=input_fn, print_fn=print_fn, log_store=log_store)
     if not cart_context.shopping_cart_id:
@@ -250,6 +284,10 @@ def _run_cart_edit(
 
     if add is not None:
         return _run_cart_edit_add(client, cart_context, add, print_fn, quantity=quantity)
+
+    if qty is not None:
+        slug, new_qty = qty
+        return _run_cart_edit_qty(client, cart_context, slug, new_qty, print_fn)
 
     return _run_cart_edit_interactive(client, cart_context, input_fn, print_fn)
 
@@ -435,6 +473,14 @@ valid together with --add. errors instead of touching the cart if
 <new-slug> is already a line in your cart -- rerunning --add would otherwise
 have to guess whether you wanted +N or to leave it alone; use --replace or
 reorder for an item already in your cart.
+
+changing the quantity of an item already in your cart:
+  silpo-agent cart edit --qty <slug> <num>
+sets that cart line's quantity to <num> -- an absolute set, not a delta (so
+--qty milk 3 always leaves you with 3, regardless of what was there before).
+<num> accepts a number like 0.5 or 1.5 for weighted products. mutually
+exclusive with --replace/--add. errors instead of touching the cart if
+<slug> isn't already a line in it -- use --add to add it first.
 """
 
 _REORDER_EPILOG = """\
@@ -561,6 +607,15 @@ def main(
         "nothing removed. Errors instead of touching the cart if NEW_SLUG is already in it -- use --replace or "
         "reorder instead.",
     )
+    edit_group.add_argument(
+        "--qty",
+        nargs=2,
+        metavar=("SLUG", "NUM"),
+        default=None,
+        help="Non-interactive: set SLUG's existing cart line quantity to the absolute value NUM (a set, not a "
+        "delta), zero prompts. NUM accepts a number, e.g. 0.5 for weighted products sold by kg. Errors instead "
+        "of touching the cart if SLUG isn't already a line in it.",
+    )
     edit_parser.add_argument(
         "--quantity",
         type=float,
@@ -662,6 +717,7 @@ def main(
                 args.replace,
                 args.add,
                 args.quantity,
+                args.qty,
             )
         if args.cart_command == "promos":
             return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)

@@ -8,8 +8,14 @@ Real schema (see docs/mcp_schema.md's "Cart tools" section, live-verified):
 - `silpo_add_or_update_cart_products` -- same real payload shape
   `cart_writer.py` already established: `{"shoppingCartId", "products":
   [{"productId", "companyId", "branchId", "quantity", "addQuantity",
-  "comment"}]}`. There is no in-place "update this line" call -- remove-then-
-  add is the only way to change a cart item.
+  "comment"}]}`. There is no separate "swap this line for a different
+  product" call -- remove-then-add is the only way to do that (see
+  `swap_cart_item`). Changing an *existing* line's quantity in place doesn't
+  need a remove at all, though: `cart_writer.py`'s own doc note says
+  `addQuantity: True` "adds to, rather than overwrites, any existing
+  quantity" -- the corollary, confirmed by `set_cart_item_quantity` below, is
+  that `addQuantity: False` with the line's own `productId` overwrites it,
+  i.e. sets the absolute quantity.
 
 Products are addressed by **slug**, not by product id (issue #50) -- see
 `resolve_product_by_slug` below and docs/mcp_schema.md's issue #50 section.
@@ -66,6 +72,10 @@ class CartEditResult:
     removed_slug: str | None
     added_slug: str | None
     added_price: float
+    # Only set by set_cart_item_quantity (--qty); every other constructor
+    # leaves these at their default, so existing call sites are unaffected.
+    old_quantity: float | None = None
+    new_quantity: float | None = None
 
 
 def _is_plastic_bag(product: dict) -> bool:
@@ -137,7 +147,7 @@ def resolve_product_by_slug(client, cart_context: CartContext, slug: str) -> dic
     return response.get("product") or None
 
 
-def _add_call(client, cart_context: CartContext, product_id: str, company_id, branch_id, quantity):
+def _add_call(client, cart_context: CartContext, product_id: str, company_id, branch_id, quantity, add_quantity: bool = True):
     return client.call(
         "silpo_add_or_update_cart_products",
         {
@@ -148,7 +158,7 @@ def _add_call(client, cart_context: CartContext, product_id: str, company_id, br
                     "companyId": company_id,
                     "branchId": branch_id,
                     "quantity": quantity,
-                    "addQuantity": True,
+                    "addQuantity": add_quantity,
                 }
             ],
         },
@@ -246,6 +256,29 @@ def add_cart_item(client, cart_context: CartContext, new_product: dict, quantity
         removed_slug=None,
         added_slug=new_product.get("slug"),
         added_price=new_product.get("price", 0.0),
+    )
+
+
+def set_cart_item_quantity(client, cart_context: CartContext, slug: str, quantity: float) -> CartEditResult:
+    """Sets an existing cart line's quantity to the absolute value `quantity`
+    (a set, not a delta). Raises `CartEditError` -- making zero MCP calls --
+    if `slug` isn't a line in the cart."""
+    item = _find_cart_product(cart_context, slug)
+    if item is None:
+        raise CartEditError(f"{slug!r} is not in your cart.")
+
+    old_quantity = item.get("quantity") or 0
+    company_id = item.get("companyId") or cart_context.company_id
+    branch_id = item.get("branchId") or cart_context.branch_id
+
+    _add_call(client, cart_context, item.get("productId"), company_id, branch_id, quantity, add_quantity=False)
+
+    return CartEditResult(
+        removed_slug=None,
+        added_slug=slug,
+        added_price=item.get("price", 0.0),
+        old_quantity=old_quantity,
+        new_quantity=quantity,
     )
 
 
