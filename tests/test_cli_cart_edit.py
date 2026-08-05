@@ -380,11 +380,54 @@ def test_cart_edit_add_flag_unresolvable_slug_errors_without_mutating(capsys, tm
     assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
 
 
+def test_cart_edit_remove_flag_removes_with_zero_prompts(capsys, tmp_path):
+    products = [{"productId": "milk-uuid", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "price": 45.0}]
+    client = FakeClient(_resolved_cart_context_with_products(products))
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    def input_fn(prompt=""):
+        raise AssertionError("--remove must not prompt")
+
+    exit_code = main(["cart", "edit", "--remove", "milk"], client=client, log_store=log_store, input_fn=input_fn)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Removed milk" in out
+    assert (
+        "silpo_remove_cart_products",
+        {"shoppingCartId": "cart-1", "products": [{"productId": "milk-uuid"}]},
+    ) in client.calls
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
 def test_cart_edit_replace_and_add_together_is_rejected_by_argparse():
     import pytest
 
     with pytest.raises(SystemExit):
         main(["cart", "edit", "--replace", "a", "b", "--add", "c"], client=FakeClient({}), input_fn=lambda p="": "")
+
+
+def test_cart_edit_remove_and_replace_together_is_rejected_by_argparse():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["cart", "edit", "--remove", "a", "--replace", "b", "c"], client=FakeClient({}), input_fn=lambda p="": "")
+
+
+def test_cart_edit_remove_unknown_slug_errors_without_mutating(capsys, tmp_path):
+    products = [{"productId": "bread-uuid", "slug": "bread", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    client = FakeClient(_resolved_cart_context_with_products(products))
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    def input_fn(prompt=""):
+        raise AssertionError("--remove must not prompt")
+
+    exit_code = main(["cart", "edit", "--remove", "milk"], client=client, log_store=log_store, input_fn=input_fn)
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "milk" in out
+    assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)
 
 
 def test_cart_edit_interactive_no_search_results_errors_without_mutating(capsys, tmp_path):

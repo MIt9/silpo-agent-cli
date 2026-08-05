@@ -76,6 +76,10 @@ class CartEditResult:
     # leaves these at their default, so existing call sites are unaffected.
     old_quantity: float | None = None
     new_quantity: float | None = None
+    # Only set by remove_cart_item (a pure delete has no added_price to
+    # report); defaults to 0.0 so swap/add's existing keyword-only
+    # construction sites are unaffected.
+    removed_price: float = 0.0
 
 
 def _is_plastic_bag(product: dict) -> bool:
@@ -279,6 +283,25 @@ def set_cart_item_quantity(client, cart_context: CartContext, slug: str, quantit
         added_price=item.get("price", 0.0),
         old_quantity=old_quantity,
         new_quantity=quantity,
+    )
+
+
+def remove_cart_item(client, cart_context: CartContext, slug: str) -> CartEditResult:
+    """Removes the cart line whose slug is `slug`, adding nothing back --
+    the delete-only counterpart to `swap_cart_item`. Raises `CartEditError`
+    -- making zero MCP calls -- if `slug` isn't actually a line in the cart,
+    same guard `swap_cart_item` applies to its old-slug argument."""
+    item = _find_cart_product(cart_context, slug)
+    if item is None:
+        raise CartEditError(f"{slug!r} is not in your cart.")
+
+    client.call(
+        "silpo_remove_cart_products",
+        {"shoppingCartId": cart_context.shopping_cart_id, "products": [{"productId": item.get("productId")}]},
+    )
+
+    return CartEditResult(
+        removed_slug=slug, added_slug=None, added_price=0.0, removed_price=item.get("price", 0.0)
     )
 
 
