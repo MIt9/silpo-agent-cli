@@ -37,7 +37,19 @@ def format_cart(context: CartContext) -> list[str]:
             quantity = _or_unknown(product.get("quantity"))
             price = _or_unknown(product.get("price"))
             stock = _or_unknown(product.get("stock"))
-            line = f"  - {name} x{quantity} @ {price} (stock: {stock})"
+            # Issue #6: a weighted cart line's `quantity` is already the real
+            # kg amount (docs/mcp_schema.md's order-history section confirms
+            # fractional kg quantities like 1.232 for weighted goods) -- the
+            # line's own `ratio` field (e.g. "100г") is unreliable for a
+            # weighted item priced per kg, so it's ignored in favor of a
+            # hardcoded "кг" unit. Driven by this cart line's own `weighted`
+            # flag only, not a cross-call reconciliation with
+            # resolve_product_by_slug's separate `ratio`.
+            if product.get("weighted") and isinstance(quantity, (int, float)):
+                qty_display = f"{float(quantity)} кг"
+            else:
+                qty_display = f"x{quantity}"
+            line = f"  - {name} {qty_display} @ {price} (stock: {stock})"
             # Issue #50: the slug is this CLI's public product identifier --
             # `cart edit --replace` takes slugs, and this is the only command
             # that lists what's currently in the cart, so without it the

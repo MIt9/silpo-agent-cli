@@ -75,6 +75,33 @@ def test_product_without_a_slug_renders_without_a_dangling_identifier():
     assert text.rstrip().endswith("(stock: 3)")
 
 
+def test_weighted_cart_item_shows_real_quantity_and_unit_not_x_count():
+    """Issue #6: a weighted cart line's `quantity` is already the real kg
+    amount (matching order-history's fractional kg quantities, e.g. `1.232`
+    kg of nectarines) -- the cart line's own `ratio: "100г"` is misleading
+    for a weighted line priced per kg and shouldn't be trusted for the unit.
+    `weighted: true` on the cart line itself drives display; no cross-call
+    reconciliation with resolve_product_by_slug is needed."""
+    products = [
+        {
+            "productId": "p1",
+            "name": "Нектарин",
+            "quantity": 1,
+            "price": 75.99,
+            "ratio": "100г",
+            "weighted": True,
+            "addToBasketStep": 0.4,
+            "stock": 10,
+        }
+    ]
+    context = _context(products=products)
+
+    text = "\n".join(format_cart(context))
+
+    assert "Нектарин 1.0 кг @ 75.99" in text
+    assert "x1" not in text
+
+
 def test_cart_with_validations_shows_them_without_blocking():
     validations = [
         {"level": "error", "type": "timeslot", "message": "timeslot.not_found", "context": []},
