@@ -238,6 +238,49 @@ def test_cart_edit_add_flag_adds_new_line_with_zero_prompts(capsys, tmp_path):
     assert added_call[1]["products"][0]["branchId"] == "b2"
 
 
+def test_cart_edit_add_with_quantity_flag_adds_that_many(capsys, tmp_path):
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_product_details": _details(
+                {"id": "carrot-uuid", "slug": "carrot", "name": "Carrot", "price": 41.42, "companyId": "c1", "branchId": "b1"}
+            ),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["cart", "edit", "--add", "carrot", "--quantity", "2"],
+        client=client,
+        log_store=log_store,
+        input_fn=lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Added carrot x2" in out
+    added_call = next(c for c in client.calls if c[0] == "silpo_add_or_update_cart_products")
+    assert added_call[1]["products"][0]["quantity"] == 2
+
+
+def test_cart_edit_quantity_without_add_is_rejected(capsys, tmp_path):
+    client = FakeClient(_resolved_cart_context_with_products([]))
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["cart", "edit", "--quantity", "2"],
+        client=client,
+        log_store=log_store,
+        input_fn=lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "--quantity" in out
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
 def test_cart_edit_add_flag_already_in_cart_errors_without_mutating(capsys, tmp_path):
     products = [{"productId": "oat-milk-uuid", "slug": "oat-milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
     client = FakeClient(

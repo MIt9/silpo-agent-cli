@@ -119,20 +119,24 @@ def _run_cart_edit_replace(client, cart_context, old_slug, new_slug, print_fn) -
     return 0
 
 
-def _run_cart_edit_add(client, cart_context, new_slug, print_fn) -> int:
-    """Non-interactive add: adds NEW_SLUG as a brand-new cart line, quantity
-    1, without removing anything. Errors (no MCP mutation made) if the slug
-    doesn't resolve or is already in the cart -- see add_cart_item."""
+def _run_cart_edit_add(client, cart_context, new_slug, print_fn, quantity: int = 1) -> int:
+    """Non-interactive add: adds NEW_SLUG as a brand-new cart line (quantity
+    --quantity, default 1), without removing anything. Errors (no MCP
+    mutation made) if the slug doesn't resolve, is already in the cart, or
+    --quantity isn't a positive integer -- see add_cart_item."""
+    if quantity < 1:
+        print_fn(f"cart edit: --quantity must be a positive integer, got {quantity}")
+        return 1
     new_product = resolve_product_by_slug(client, cart_context, new_slug)
     if new_product is None:
         print_fn(f"cart edit: product {new_slug!r} not found")
         return 1
     try:
-        result = add_cart_item(client, cart_context, new_product)
+        result = add_cart_item(client, cart_context, new_product, quantity=quantity)
     except CartEditError as exc:
         print_fn(f"cart edit: {exc}")
         return 1
-    print_fn(f"Added {result.added_slug} ({result.added_price:.2f})")
+    print_fn(f"Added {result.added_slug} x{quantity} ({result.added_price:.2f} each)")
     return 0
 
 
@@ -232,7 +236,7 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
 
 
 def _run_cart_edit(
-    client, log_store, input_fn, print_fn, replace: list[str] | None, add: str | None = None
+    client, log_store, input_fn, print_fn, replace: list[str] | None, add: str | None = None, quantity: int = 1
 ) -> int:
     cart_context = resolve_cart_context(client, input_fn=input_fn, print_fn=print_fn, log_store=log_store)
     if not cart_context.shopping_cart_id:
@@ -244,7 +248,7 @@ def _run_cart_edit(
         return _run_cart_edit_replace(client, cart_context, old_id, new_id, print_fn)
 
     if add is not None:
-        return _run_cart_edit_add(client, cart_context, add, print_fn)
+        return _run_cart_edit_add(client, cart_context, add, print_fn, quantity=quantity)
 
     return _run_cart_edit_interactive(client, cart_context, input_fn, print_fn)
 
@@ -422,11 +426,12 @@ an old slug not actually in your cart, or a new slug that resolves to
 nothing, errors clearly and leaves the cart untouched.
 
 adding a brand-new item, no swap:
-  silpo-agent cart edit --add <new-slug>
-adds <new-slug> as a new cart line, quantity 1, without removing anything.
-mutually exclusive with --replace. errors instead of touching the cart if
+  silpo-agent cart edit --add <new-slug> [--quantity N]
+adds <new-slug> as a new cart line (quantity 1, or --quantity), without
+removing anything. mutually exclusive with --replace; --quantity is only
+valid together with --add. errors instead of touching the cart if
 <new-slug> is already a line in your cart -- rerunning --add would otherwise
-have to guess whether you wanted +1 or to leave it alone; use --replace or
+have to guess whether you wanted +N or to leave it alone; use --replace or
 reorder for an item already in your cart.
 """
 
@@ -550,8 +555,16 @@ def main(
         "--add",
         metavar="NEW_SLUG",
         default=None,
-        help="Non-interactive: add NEW_SLUG as a new cart line (quantity 1), zero prompts, nothing removed. "
-        "Errors instead of touching the cart if NEW_SLUG is already in it -- use --replace or reorder instead.",
+        help="Non-interactive: add NEW_SLUG as a new cart line (quantity 1, or --quantity), zero prompts, "
+        "nothing removed. Errors instead of touching the cart if NEW_SLUG is already in it -- use --replace or "
+        "reorder instead.",
+    )
+    edit_parser.add_argument(
+        "--quantity",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Quantity for --add (default: 1). Only valid together with --add.",
     )
     cart_subparsers.add_parser(
         "promos",
@@ -635,8 +648,17 @@ def main(
 
     if args.command == "cart":
         if args.cart_command == "edit":
+            if args.quantity != 1 and args.add is None:
+                print_fn("cart edit: --quantity is only valid together with --add")
+                return 1
             return _run_cart_edit(
-                client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn, args.replace, args.add
+                client or MCPClient(),
+                log_store or ReorderLogStore(),
+                input_fn,
+                print_fn,
+                args.replace,
+                args.add,
+                args.quantity,
             )
         if args.cart_command == "promos":
             return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)

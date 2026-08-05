@@ -329,6 +329,17 @@ def test_add_cart_item_adds_a_new_line_quantity_one():
     assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)
 
 
+def test_add_cart_item_uses_the_given_quantity():
+    context = cart_context()
+    client = FakeClient()
+    new_product = {"id": "oat-milk", "slug": "oat-milk", "companyId": "c2", "branchId": "b2", "price": 55.0}
+
+    add_cart_item(client, context, new_product, quantity=2)
+
+    added_call = next(c for c in client.calls if c[0] == "silpo_add_or_update_cart_products")
+    assert added_call[1]["products"][0]["quantity"] == 2
+
+
 def test_add_cart_item_falls_back_to_cart_context_branch_and_company():
     context = cart_context(branch_id="ctx-b", company_id="ctx-c")
     client = FakeClient()

@@ -16,8 +16,9 @@ uv run silpo-agent <command> ...
 ```
 
 All commands are **interactive** (prompt on stdin) except `deals` and
-`cart edit --replace`. Run interactive commands in the foreground / a tool
-call the user can actually answer prompts in -- never background them.
+`cart edit --replace`/`cart edit --add`. Run interactive commands in the
+foreground / a tool call the user can actually answer prompts in -- never
+background them.
 
 First run ever needs a one-time OAuth browser login against
 `mcp.silpo.ua`; token then caches in the OS keyring. If a run hangs with no
@@ -53,7 +54,8 @@ uv run silpo-agent reorder --last N --threshold 0-1 [--budget UAH] [--optimize p
 uv run silpo-agent cart              # read-only: items, payable total, bonus balance
 uv run silpo-agent cart promos       # read-only: discounted alternatives per item
 uv run silpo-agent cart edit         # interactive: replace one item
-uv run silpo-agent cart edit --replace OLD_SLUG NEW_SLUG   # non-interactive
+uv run silpo-agent cart edit --replace OLD_SLUG NEW_SLUG   # non-interactive swap
+uv run silpo-agent cart edit --add NEW_SLUG [--quantity N] # non-interactive add, no swap
 ```
 - Plain `cart` is the read-only check -- use this (not `reorder`) when the
   user just wants to know what's in the cart, since `reorder` mutates it.
@@ -61,9 +63,15 @@ uv run silpo-agent cart edit --replace OLD_SLUG NEW_SLUG   # non-interactive
 - `cart edit` interactive: lists cart items → pick one → find replacement
   by free-text search or promo alternatives (`cart promos` reused) →
   confirm swap → old item removed only after new one confirmed to exist.
-- `cart edit --replace` slugs must come from real output (`cart`, `deals`,
-  `favorites-deals`, `cart promos`) -- never construct a slug from a
-  product name, Silpo generates them.
+- `cart edit --replace` and `--add` slugs must come from real output
+  (`cart`, `deals`, `favorites-deals`, `cart promos`) -- never construct a
+  slug from a product name, Silpo generates them.
+- `--replace` needs an existing cart line to swap out. `--add` is for a
+  brand-new item that isn't in the cart yet (e.g. a discovered deal) --
+  quantity 1 by default, `--quantity N` for more. It errors instead of
+  mutating anything if the slug is already a cart line (use `--replace` or
+  `reorder` for that instead, so quantity never silently doubles).
+  `--quantity` only makes sense together with `--add`.
 
 ### delivery -- set address, delivery type, timeslot
 
@@ -82,9 +90,19 @@ under the new delivery context (informational only, nothing auto-removed).
 ```bash
 uv run silpo-agent coupons            # active loyalty coupons: condition, validity, reward
 uv run silpo-agent favorites-deals    # own favorites currently discounted
-uv run silpo-agent deals [--limit N]  # store-wide biggest discounts, default limit 10
+uv run silpo-agent deals [--limit N] [--category NAME]  # store-wide biggest discounts, default limit 10
 ```
 None of these touch the cart or account.
+- `--category NAME` scopes the scan to one category (e.g. `--category
+  Овочі`, `--category Пиво`) instead of every active promo store-wide.
+  Matched against real category titles: exact match preferred, else the
+  shortest title containing it (so "Овочі" resolves to the vegetables
+  category itself, not the broader "Фрукти, овочі"). Errors clearly if
+  nothing matches, rather than silently showing "no deals."
+- A parent category (e.g. "Фрукти, овочі") does **not** include its child
+  categories' products (e.g. "Овочі", "Фрукти") -- Silpo's category filter
+  isn't recursive. If a broad category search looks thin, try the more
+  specific child category by name instead.
 
 ### clear-context -- wipe local state
 
