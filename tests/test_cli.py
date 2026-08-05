@@ -1246,6 +1246,78 @@ def test_cart_promos_on_empty_cart_reports_cleanly_without_error(capsys):
     assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
 
 
+def _categories_page(*slug_titles):
+    return {
+        "success": True,
+        "categories": [{"id": f"id-{slug}", "slug": slug, "title": title} for slug, title in slug_titles],
+        "meta": {"total": len(slug_titles)},
+    }
+
+
+def test_deals_category_fallback_match_prints_disambiguation(capsys):
+    """Issue #05: "Вино" (wine) must not silently return "Виноград" (grapes)
+    deals with zero indication it wasn't an exact match -- the CLI must say
+    which real category title it fell back to."""
+    client = FakeClient(
+        {
+            "silpo_get_categories": _categories_page(("vynograd-123", "Виноград")),
+            "silpo_get_products": {
+                "success": True,
+                "products": [{"id": "p1", "name": "Grapes", "slug": "p1", "price": 40.0, "oldPrice": 50.0}],
+            },
+            **_resolved_cart_context(),
+        }
+    )
+
+    exit_code = main(["deals", "--category", "Вино"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert 'matched category "Виноград" for query "Вино"' in out
+
+
+def test_deals_category_exact_match_prints_no_extra_output(capsys):
+    """Issue #05: exact-title queries must behave exactly as before -- no
+    disambiguation line."""
+    client = FakeClient(
+        {
+            "silpo_get_categories": _categories_page(("ovochi-4808", "Овочі")),
+            "silpo_get_products": {
+                "success": True,
+                "products": [{"id": "p1", "name": "Carrots", "slug": "p1", "price": 20.0, "oldPrice": 25.0}],
+            },
+            **_resolved_cart_context(),
+        }
+    )
+
+    exit_code = main(["deals", "--category", "Овочі"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "matched category" not in out
+    assert "Carrots" in out
+
+
+def test_deals_list_categories_prints_titles_without_fetching_deals(capsys):
+    """Issue #05: `deals --list-categories` is read-only -- shows what
+    `--category` accepts, fetches no deals/promotions."""
+    client = FakeClient(
+        {
+            "silpo_get_categories": _categories_page(("frukty-4791", "Фрукти"), ("ovochi-4808", "Овочі")),
+            **_resolved_cart_context(),
+        }
+    )
+
+    exit_code = main(["deals", "--list-categories"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Фрукти" in out
+    assert "Овочі" in out
+    assert all(call[0] != "silpo_get_promotions" for call in client.calls)
+    assert all(call[0] != "silpo_get_products" for call in client.calls)
+
+
 def test_version_flag_prints_version_and_exits_zero(capsys):
     try:
         main(["--version"])
