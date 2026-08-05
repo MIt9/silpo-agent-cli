@@ -20,7 +20,7 @@ import sys
 from importlib.metadata import version
 
 from silpo_agent.address_resolver import resolve_address
-from silpo_agent.auth import MCPClient
+from silpo_agent.auth import MCPClient, TokenStore
 from silpo_agent.cart_context import resolve_cart_context
 from silpo_agent.cart_editor import (
     add_cart_item,
@@ -42,19 +42,49 @@ from silpo_agent.promo_finder import find_promo_alternatives
 from silpo_agent.promo_optimizer import optimize_promos
 from silpo_agent.promo_scanner import CategoryNotFoundError, list_category_titles, resolve_category, scan_deals
 from silpo_agent.substitution_resolver import resolve_substitutions
+from silpo_agent.timeslot_format import format_timeslot
+
+
+def _auto_yes_input_fn(print_fn):
+    """input_fn that answers every reorder prompt without a terminal attached.
+
+    Confirms the proposed default on yes/no prompts ("[y/N]", "[Y/n]") and
+    picks the first candidate on numbered picks ("Pick a number: "). Echoes
+    the prompt and its answer via print_fn so --yes runs stay auditable in
+    the output instead of silently deciding things.
+    """
+
+    def _input(prompt: str) -> str:
+        answer = "1" if "Pick a number:" in prompt else "y"
+        print_fn(f"{prompt}{answer}")
+        return answer
+
+    return _input
 
 
 def _run_reorder(
-    last: int, threshold: float, client, log_store, budget: float | None = None, optimize: str | None = None
+    last: int,
+    threshold: float,
+    client,
+    log_store,
+    budget: float | None = None,
+    optimize: str | None = None,
+    yes: bool = False,
+    print_fn=None,
 ) -> int:
-    address = resolve_address(client, log_store)
+    print_fn = print_fn or print
+    input_fn = _auto_yes_input_fn(print_fn) if yes else None
+
+    address = resolve_address(client, log_store, input_fn=input_fn, print_fn=print_fn)
     if address is None:
         print("reorder: no delivery address resolved; aborting before product search", file=sys.stderr)
         return 1
 
     # Pass the already-resolved address through so Cart Context Resolver's
     # no-shipments fallback (issue #29) reuses it instead of prompting again.
-    cart_context = resolve_cart_context(client, resolved_address=address, log_store=log_store)
+    cart_context = resolve_cart_context(
+        client, resolved_address=address, log_store=log_store, input_fn=input_fn, print_fn=print_fn
+    )
 
     orders_response = client.call("silpo_get_my_online_orders", {"limit": min(last, 100)}) or []
     orders = orders_response.get("orders", []) if isinstance(orders_response, dict) else orders_response
@@ -64,7 +94,9 @@ def _run_reorder(
         print(f"reorder: {exc}", file=sys.stderr)
         return 1
 
-    substitution_result = resolve_substitutions(client, log_store, typical_items, cart_context)
+    substitution_result = resolve_substitutions(
+        client, log_store, typical_items, cart_context, input_fn=input_fn, print_fn=print_fn
+    )
 
     items = substitution_result.items
     promo_result = None
@@ -72,10 +104,16 @@ def _run_reorder(
         promo_result = optimize_promos(client, items, cart_context)
         items = promo_result.items
 
-    report = write_cart(client, items, cart_context, budget=budget)
+    report = write_cart(client, items, cart_context, budget=budget, input_fn=input_fn, print_fn=print_fn)
 
     if address:
         print(f"Delivering to: {address.label}")
+    if cart_context.delivery_type:
+        print(f"Delivery type: {cart_context.delivery_type}")
+    if cart_context.timeslot_start:
+        print(f"Timeslot: {format_timeslot(cart_context.timeslot_start, cart_context.timeslot_end)}")
+    else:
+        print("Timeslot: not set yet -- run 'silpo-agent delivery' to choose one")
     for original_id, replacement_id in substitution_result.substitutions:
         print(f"Substituted {original_id} -> {replacement_id}")
     if substitution_result.unavailable:
@@ -310,15 +348,18 @@ def _run_cart_edit(
     return _run_cart_edit_interactive(client, cart_context, input_fn, print_fn)
 
 
-def _run_clear_context(log_store, input_fn, print_fn) -> int:
-    answer = input_fn(
-        "This will permanently delete your local reorder history and substitution memory. Continue? [y/N] "
-    ).strip().lower()
-    if answer not in ("y", "yes"):
-        print_fn("Aborted: local data left unchanged.")
-        return 0
+def _run_clear_context(log_store, token_store, input_fn, print_fn, *, yes: bool = False) -> int:
+    if not yes:
+        answer = input_fn(
+            "This will permanently delete your local reorder history, substitution memory, and log you out "
+            "(cached OAuth token). Continue? [y/N] "
+        ).strip().lower()
+        if answer not in ("y", "yes"):
+            print_fn("Aborted: local data left unchanged.")
+            return 0
     log_store.clear()
-    print_fn("Cleared local reorder history and substitution memory.")
+    token_store.clear()
+    print_fn("Cleared local reorder history, substitution memory, and logged out.")
     return 0
 
 
@@ -419,13 +460,16 @@ First run triggers a one-time browser login (OAuth2.1+PKCE against
 mcp.silpo.ua); the token is cached in your OS keyring afterward, so
 later runs don't re-prompt until it expires.
 
+running with no subcommand is the same as 'cart': shows your current real
+cart -- delivery address/type/timeslot, items, payable total, bonus balance.
+
 commands:
   cart            show your current real cart: items, payable total, bonus balance (read-only)
   cart edit       manually replace one cart item with another, or add a new one
   cart promos     show real promo alternatives for every item in your cart (read-only)
   reorder         rebuild your cart from your typical (frequently-bought) items
   delivery        explicitly set your delivery address, delivery type, and timeslot
-  clear-context   wipe your local reorder history and substitution memory
+  clear-context   wipe your local reorder history, substitution memory, and cached login
   coupons         list your active loyalty coupons (read-only)
   deals           show the best current store-wide discounts (read-only)
   favorites-deals list your favorited products currently on discount (read-only)
@@ -435,9 +479,12 @@ run 'silpo-agent reorder --help' for reorder's flags and examples.
 
 _CLEAR_CONTEXT_EPILOG = """\
 deletes the local Reorder Log and Substitution Memory (~/.silpo-agent/
-reorder_log.json) after asking for confirmation -- declining leaves
-everything untouched. Purely local state: never touches the OS keyring
-auth token, your real Silpo cart, or the Silpo servers (no MCP calls).
+reorder_log.json) and the cached OAuth token in your OS keyring, after
+asking for confirmation -- declining leaves everything untouched. Never
+touches your real Silpo cart or the Silpo servers (no MCP calls). The next
+command that needs a token triggers a fresh browser login.
+
+pass --yes (-y) to skip the confirmation prompt and clear immediately.
 """
 
 _DELIVERY_EPILOG = """\
@@ -550,11 +597,14 @@ examples:
 
   # same, plus apply any available loyalty bonuses to the cart
   silpo-agent reorder --last 10 --threshold 0.5 --optimize promos
+
+  # non-interactive: auto-confirm every prompt (address, cart warning, substitution picks)
+  silpo-agent reorder --last 10 --threshold 0.5 --yes
 """
 
 
 def main(
-    argv: list[str] | None = None, *, client=None, log_store=None, input_fn=None, print_fn=None
+    argv: list[str] | None = None, *, client=None, log_store=None, token_store=None, input_fn=None, print_fn=None
 ) -> int:
     input_fn = input_fn or input
     print_fn = print_fn or print
@@ -607,6 +657,15 @@ def main(
         default=None,
         help="Opt-in only -- omitting this flag makes zero promo-related calls. "
         "'promos' applies any available loyalty bonuses to the cart before checkout.",
+    )
+    reorder_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Non-interactive: auto-confirm the proposed delivery address, auto-confirm adding to a "
+        "non-empty cart, and auto-pick the first candidate on any substitution with multiple replacements. "
+        "Every auto-answered prompt is still printed, and the final report still lists the address used, "
+        "substitutions made, and items added -- nothing is decided silently.",
     )
 
     cart_parser = subparsers.add_parser(
@@ -687,13 +746,19 @@ def main(
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    subparsers.add_parser(
+    clear_context_parser = subparsers.add_parser(
         "clear-context",
-        help="Wipe your local reorder history and substitution memory",
-        description="Wipe the local Reorder Log and Substitution Memory after confirmation. Purely local state -- "
-        "no MCP calls, and the OS keyring auth token / real Silpo cart are never touched.",
+        help="Wipe your local reorder history, substitution memory, and cached login",
+        description="Wipe the local Reorder Log, Substitution Memory, and cached OAuth token after confirmation "
+        "-- logs you out. No MCP calls, and your real Silpo cart is never touched.",
         epilog=_CLEAR_CONTEXT_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    clear_context_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Non-interactive: skip the confirmation prompt and clear immediately.",
     )
 
     subparsers.add_parser(
@@ -742,8 +807,7 @@ def main(
     args = parser.parse_args(argv)
 
     if args.command is None:
-        parser.print_help()
-        return 0
+        return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     if args.command == "reorder":
         return _run_reorder(
@@ -753,6 +817,8 @@ def main(
             log_store or ReorderLogStore(),
             budget=args.budget,
             optimize=args.optimize,
+            yes=args.yes,
+            print_fn=print_fn,
         )
 
     if args.command == "cart":
@@ -782,7 +848,9 @@ def main(
         return _run_delivery(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     if args.command == "clear-context":
-        return _run_clear_context(log_store or ReorderLogStore(), input_fn, print_fn)
+        return _run_clear_context(
+            log_store or ReorderLogStore(), token_store or TokenStore(), input_fn, print_fn, yes=args.yes
+        )
 
     if args.command == "coupons":
         return _run_coupons(client or MCPClient())

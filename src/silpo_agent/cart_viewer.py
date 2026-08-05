@@ -10,7 +10,9 @@ Real schema (docs/mcp_schema.md's "Cart tools" section): each cart product
 ticket; CartContext previously exposed no total at all).
 """
 
+from silpo_agent.address_resolver import _build_label
 from silpo_agent.cart_context import CartContext
+from silpo_agent.timeslot_format import format_timeslot
 
 
 def _or_unknown(value):
@@ -22,6 +24,15 @@ def _or_unknown(value):
 
 def format_cart(context: CartContext) -> list[str]:
     lines: list[str] = []
+
+    if context.address:
+        lines.append(f"Delivering to: {_build_label(context.address)}")
+    if context.delivery_type:
+        lines.append(f"Delivery type: {context.delivery_type}")
+    if context.timeslot_start:
+        lines.append(f"Timeslot: {format_timeslot(context.timeslot_start, context.timeslot_end)}")
+    else:
+        lines.append("Timeslot: not set yet -- run 'silpo-agent delivery' to choose one")
 
     # A cart with only zero-quantity line items (if the live API ever
     # returns that) is treated as non-empty here -- context.products is

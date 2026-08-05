@@ -91,10 +91,18 @@ def _search_query(item: TypicalItem) -> str:
     return item.name or item.product_id
 
 
+_FIND_PRODUCTS_BATCH_MAX = 30
+
+
 def _check_availability(client, items: list[TypicalItem], cart_context: CartContext) -> dict[str, bool]:
-    """One batched `silpo_get_replacements`-adjacent availability lookup via
+    """Batched `silpo_get_replacements`-adjacent availability lookup via
     `silpo_find_products_batch`, keyed by each item's search query (see
-    `_search_query`). Returns {product_id: is_available}."""
+    `_search_query`). Returns {product_id: is_available}.
+
+    `silpo_find_products_batch` rejects more than 30 products per call
+    (real, live-observed limit -- a wide typical-item net, e.g. a low
+    --threshold or high --last, can easily exceed it), so queries are
+    chunked."""
     if not items:
         return {}
 
@@ -102,29 +110,32 @@ def _check_availability(client, items: list[TypicalItem], cart_context: CartCont
     for item in items:
         query_to_ids.setdefault(_search_query(item), []).append(item.product_id)
 
-    response = (
-        client.call(
-            "silpo_find_products_batch",
-            {
-                "branchId": cart_context.branch_id,
-                "deliveryType": cart_context.delivery_type,
-                "timeslotStart": cart_context.timeslot_start,
-                "timeslotEnd": cart_context.timeslot_end,
-                "products": list(query_to_ids),
-                "limit": 1,
-            },
-        )
-        or {}
-    )
-
+    queries = list(query_to_ids)
     availability: dict[str, bool] = {}
-    for query_result in response.get("queries") or []:
-        query = query_result.get("query")
-        products = query_result.get("products") or []
-        top = products[0] if products else None
-        is_available = bool(top and top.get("available") and (top.get("stock") or 0) > 0)
-        for product_id in query_to_ids.get(query, []):
-            availability[product_id] = is_available
+    for i in range(0, len(queries), _FIND_PRODUCTS_BATCH_MAX):
+        chunk = queries[i : i + _FIND_PRODUCTS_BATCH_MAX]
+        response = (
+            client.call(
+                "silpo_find_products_batch",
+                {
+                    "branchId": cart_context.branch_id,
+                    "deliveryType": cart_context.delivery_type,
+                    "timeslotStart": cart_context.timeslot_start,
+                    "timeslotEnd": cart_context.timeslot_end,
+                    "products": chunk,
+                    "limit": 1,
+                },
+            )
+            or {}
+        )
+
+        for query_result in response.get("queries") or []:
+            query = query_result.get("query")
+            products = query_result.get("products") or []
+            top = products[0] if products else None
+            is_available = bool(top and top.get("available") and (top.get("stock") or 0) > 0)
+            for product_id in query_to_ids.get(query, []):
+                availability[product_id] = is_available
     return availability
 
 

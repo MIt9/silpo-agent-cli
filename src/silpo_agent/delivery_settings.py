@@ -100,6 +100,7 @@ from dataclasses import dataclass, field
 
 from silpo_agent.address_resolver import resolve_address
 from silpo_agent.cart_context import resolve_cart_context
+from silpo_agent.timeslot_format import format_timeslot
 
 _TARGET_DELIVERY_TYPE = "DeliveryHome"
 _SUPPORTED_DELIVERY_TYPES = ("DeliveryHome", "SelfPickup", "NovaPoshta")
@@ -301,7 +302,7 @@ def _pick_timeslot(client, branch_id, delivery_type, input_fn, print_fn) -> dict
         return None
 
     for i, slot in enumerate(slots, start=1):
-        print_fn(f"{i}. {slot.get('start')} - {slot.get('end')}")
+        print_fn(f"{i}. {format_timeslot(slot.get('start'), slot.get('end'))}")
     choice = input_fn("Pick a timeslot by number: ").strip()
     idx = int(choice) if choice.isdigit() else None
     if not idx or not (1 <= idx <= len(slots)):
@@ -404,7 +405,7 @@ def run_delivery_settings(client, log_store, *, input_fn=None, print_fn=None):
         print_fn("delivery: failed to update delivery settings.")
         return DeliveryResult(applied=False)
 
-    print_fn(f"Delivery settings updated: {delivery_type}, {timeslot['start']} - {timeslot['end']}.")
+    print_fn(f"Delivery settings updated: {delivery_type}, {format_timeslot(timeslot['start'], timeslot['end'])}.")
 
     new_context = resolve_cart_context(client, resolved_address=resolved_address, print_fn=print_fn)
     newly_unavailable = _newly_unavailable(cart_context.products, new_context.validations)

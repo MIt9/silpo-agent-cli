@@ -4,8 +4,11 @@ already-resolved `CartContext` (issue #17's `resolve_cart_context`) and
 warns the user if it already has items from a prior session (CONTEXT.md's
 "Non-empty cart guard" -- warn-and-proceed-or-abort, never auto-clear or
 silently merge). Applies the optional `--budget` cap by trimming the
-lowest-priority Typical Items (by frequency) until the total fits, if set --
-otherwise just totals and reports. Adds the (possibly trimmed) items via
+lowest-priority Typical Items (by frequency) until the existing cart's own
+payable total (`CartContext.total_after_discounts`) plus the new items fits,
+if set -- otherwise just totals and reports. A reorder onto a non-empty
+cart counts what's already there against the budget, rather than treating
+`--budget` as a cap on the new items alone. Adds the (possibly trimmed) items via
 `silpo_add_or_update_cart_products` and reports what was added, trimmed, and
 the total. Cart-only: never calls checkout/payment (CONTEXT.md's "Reorder
 flow -- cart-only scope").
@@ -63,11 +66,15 @@ def _is_plastic_bag(item: TypicalItem) -> bool:
     return bool(item.name) and _PLASTIC_BAG_KEYWORD in item.name.lower()
 
 
-def _trim_to_budget(items: list[TypicalItem], budget: float) -> tuple[list[TypicalItem], list[TypicalItem]]:
-    """Drops lowest-priority (lowest frequency) items first until the total
-    fits under `budget`. Returns (kept, trimmed), both in original order.
+def _trim_to_budget(
+    items: list[TypicalItem], budget: float, already_spent: float = 0.0
+) -> tuple[list[TypicalItem], list[TypicalItem]]:
+    """Drops lowest-priority (lowest frequency) items first until
+    `already_spent` (the existing cart's own payable total, for a reorder
+    onto a non-empty cart) plus the new items' total fits under `budget`.
+    Returns (kept, trimmed), both in original order.
     """
-    total = sum(item.last_known_price for item in items)
+    total = already_spent + sum(item.last_known_price for item in items)
     if total <= budget:
         return items, []
 
@@ -114,7 +121,8 @@ def write_cart(
     items_to_add = purchasable_items
     trimmed_items: list[TypicalItem] = []
     if budget is not None:
-        items_to_add, trimmed_items = _trim_to_budget(purchasable_items, budget)
+        already_spent = cart_context.total_after_discounts or 0.0
+        items_to_add, trimmed_items = _trim_to_budget(purchasable_items, budget, already_spent)
     trimmed = [(item.product_id, item.last_known_price) for item in trimmed_items]
 
     if not items_to_add:

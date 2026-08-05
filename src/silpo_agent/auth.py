@@ -66,6 +66,12 @@ class TokenStore:
     def save(self, token: dict) -> None:
         keyring.set_password(self.service, self.username, json.dumps(token))
 
+    def clear(self) -> None:
+        try:
+            keyring.delete_password(self.service, self.username)
+        except keyring.errors.PasswordDeleteError:
+            pass
+
 
 def _post_json(url: str, payload: dict, headers: dict | None = None) -> dict:
     body = json.dumps(payload).encode()

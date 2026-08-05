@@ -173,6 +173,32 @@ def test_budget_trims_lowest_priority_items_to_fit():
     assert [p["productId"] for p in added_call[1]["products"]] == ["milk", "bread"]
 
 
+def test_budget_counts_existing_cart_total_already_spent():
+    client = FakeMCPClient()
+    context = CartContext(
+        shopping_cart_id="cart-1",
+        branch_id="b1",
+        company_id="c1",
+        delivery_type="DeliveryHome",
+        timeslot_start=None,
+        timeslot_end=None,
+        validations=[],
+        products=[{"productId": "existing"}],
+        total_after_discounts=60.0,
+    )
+    items = [
+        TypicalItem(product_id="milk", frequency=1.0, last_known_price=10.0, company_id="c1", branch_id="b1"),
+        TypicalItem(product_id="bread", frequency=0.5, last_known_price=10.0, company_id="c1", branch_id="b1"),
+    ]
+
+    report = write_cart(client, items, context, budget=75.0, input_fn=lambda prompt="": "y")
+
+    # 60 already in the cart + both 10s would be 80, over budget -- only
+    # one 10 fits (60 + 10 = 70 <= 75), the lower-frequency one is trimmed.
+    assert report.items_added == [("milk", 10.0)]
+    assert report.trimmed == [("bread", 10.0)]
+
+
 def test_budget_none_never_trims_and_reports_actual_total():
     client = FakeMCPClient()
     items = [

@@ -78,9 +78,41 @@ class FakeClient:
         return self.responses.get(tool)
 
 
-def test_no_args_prints_help_and_exits_zero(capsys):
-    assert main([]) == 0
-    assert "silpo-agent" in capsys.readouterr().out
+def test_no_args_shows_current_cart_same_as_cart_command(capsys):
+    client = FakeClient(
+        {
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": {
+                "success": True,
+                "cart": {
+                    "deliveryType": "DeliveryHome",
+                    "timeslot": {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"},
+                    "address": {"city": "Вінниця", "street": "Варшавська вулиця", "building": "27", "apartment": "25"},
+                    "shipments": [
+                        {
+                            "companyId": "c1",
+                            "branchId": "b1",
+                            "products": [
+                                {"productId": "p1", "name": "Milk 1L", "quantity": 2, "price": 49.9, "stock": 12},
+                            ],
+                        }
+                    ],
+                    "calculation": {"validations": [], "totalAfterDiscounts": 99.8},
+                },
+                "loyalty": {"bonusAvailable": 24.27},
+            },
+        }
+    )
+
+    exit_code = main([], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Delivering to: Вінниця, Варшавська вулиця, 27, кв. 25" in out
+    assert "Delivery type: DeliveryHome" in out
+    assert "Milk 1L" in out
+    assert "Payable total: 99.80" in out
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
 
 
 def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
@@ -1328,3 +1360,56 @@ def test_version_flag_prints_version_and_exits_zero(capsys):
 
     out = capsys.readouterr().out
     assert "silpo-agent" in out
+
+
+class FakeTokenStore:
+    def __init__(self):
+        self.cleared = False
+
+    def clear(self):
+        self.cleared = True
+
+
+def test_clear_context_confirmed_also_logs_out(capsys, tmp_path):
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    log_store.append_run({"timestamp": "t", "address": "a"})
+    token_store = FakeTokenStore()
+
+    exit_code = main(["clear-context"], log_store=log_store, token_store=token_store, input_fn=lambda _: "y")
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert token_store.cleared is True
+    assert "logged out" in out.lower()
+    assert log_store.read_history() == []
+
+
+def test_clear_context_declined_leaves_login_untouched(capsys, tmp_path):
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    token_store = FakeTokenStore()
+
+    exit_code = main(["clear-context"], log_store=log_store, token_store=token_store, input_fn=lambda _: "n")
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert token_store.cleared is False
+    assert "unchanged" in out.lower()
+
+
+def test_clear_context_yes_skips_confirmation_prompt(capsys, tmp_path):
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    log_store.append_run({"timestamp": "t", "address": "a"})
+    token_store = FakeTokenStore()
+
+    def _unused_input(_):
+        raise AssertionError("--yes must not prompt")
+
+    exit_code = main(
+        ["clear-context", "--yes"], log_store=log_store, token_store=token_store, input_fn=_unused_input
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert token_store.cleared is True
+    assert "logged out" in out.lower()
+    assert log_store.read_history() == []

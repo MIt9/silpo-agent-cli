@@ -47,11 +47,17 @@ class ResolvedAddress:
 
 
 def _build_label(address: dict) -> str:
-    """Human-readable label from a saved address's city/street/building/apartment,
-    e.g. "Вінниця, Варшавська вулиця, 27, кв. 25"."""
-    parts = [address.get("city"), address.get("street"), address.get("building")]
-    if address.get("apartment"):
-        parts.append(f"кв. {address['apartment']}")
+    """Human-readable label from an address's city/street/building/apartment,
+    e.g. "Вінниця, Варшавська вулиця, 27, кв. 25". Saved addresses (from
+    address_resolver/silpo_find_address) key the building/apartment as
+    "building"/"apartment"; a cart's own address (silpo_get_shopping_cart_by_id,
+    docs/mcp_schema.md) keys the same info as "house"/"flat" instead -- both
+    are checked so neither source silently drops the house/apartment number."""
+    building = address.get("building") or address.get("house")
+    apartment = address.get("apartment") or address.get("flat")
+    parts = [address.get("city"), address.get("street"), building]
+    if apartment:
+        parts.append(f"кв. {apartment}")
     return ", ".join(str(p) for p in parts if p)
 
 
