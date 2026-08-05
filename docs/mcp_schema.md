@@ -347,9 +347,18 @@ follow-up ticket.
 ### Location / branch / delivery tools
 
 - **`silpo_list_branches({"hasPickup", "hasNP", "limit", "offset"})`** —
-  response too large to fully inspect in one call (121K+ chars for the
-  default page), but its top-level schema is confirmed: `{"success",
-  "summary", "branches": [...], "meta": {"limit", "offset", "total"}}`.
+  top-level schema: `{"success", "summary", "branches": [...], "meta":
+  {"limit", "offset", "total"}}`. **Per-branch shape, live-verified
+  2026-08-05 (issue #38):** `{"branchId", "companyId", "externalId", "city",
+  "address", "latitude", "longitude", "hasPickup", "open"}` — `latitude`/
+  `longitude` come back as strings (e.g. `"50.5202200000000000"`), not
+  numbers. `hasPickup=true` returned 311 branches total (default page
+  limit 50); `hasNP=true` returned exactly **1** branch nationwide
+  (`branchId: "1ee7fab3-7713-6a0c-b802-8d149aac137a"`, Київ) — so resolving
+  a NovaPoshta shipment's branch is a lookup, not a user pick. `open: false`
+  branches were present in the `hasPickup=true` sample (e.g. a closed
+  Kyiv branch) — `delivery_settings.py` doesn't currently filter these out
+  before listing pickup options, a known gap worth revisiting if it bites.
 - **`silpo_get_time_slots({"branchId", "deliveryTypes", "start", "end",
   "limit"})`** — `{"success", "summary", "slots": [{"start", "end",
   "available", "deliveryType", "deliveryCost", "deliveryCostMap": [{"cost",
@@ -370,10 +379,21 @@ follow-up ticket.
   "link"}]}` respectively. `silpo_get_categories_tree`'s top-level schema is
   `{"success", "summary", "tree": [...]}` (full tree too large to inspect in
   one call).
-- **`silpo_find_nova_poshta_settlements`** / **`silpo_find_nova_poshta_offices`**
-  — not called live; out of scope for this project (v1 only handles
-  `DeliveryHome`/saved-address delivery, no Nova Poshta flow). Param shapes
-  only, from the tool definitions.
+- **`silpo_find_nova_poshta_settlements({"title"})`** — live-verified
+  2026-08-05 (issue #38), searched `"Київ"`: `{"success": true, "summary":
+  "Found 3 settlements", "settlements": [{"id", "title", "area",
+  "region"}]}`, e.g. `{"id": "4976878b-ccaf-4ecf-8f74-96ae0d0c6e10",
+  "title": "Київ", "area": "Київська", "region": ""}`.
+- **`silpo_find_nova_poshta_offices({"settlementId", "title"})`** —
+  live-verified 2026-08-05 against the settlement above: `{"success": true,
+  "summary": "Found N offices", "offices": [{"id", "title", "address",
+  "type", "number", "status", "latitude", "longitude"}], "meta": {"total"}}`.
+  `type` is `"office"` or `"parcelLocker"`; `latitude`/`longitude` here are
+  **numbers** (unlike `silpo_list_branches`, where they're strings).
+  Matches the tool definitions' assumed param/field names exactly — no
+  correction needed here (see "Live-verified: SelfPickup / Nova Poshta
+  address construction" below for the branch-field correction that WAS
+  needed).
 
 ## Original status note (superseded above for address tools)
 
@@ -962,6 +982,79 @@ sweeps, made while building the `delivery` command
   future live run finds one without it, that entry is silently skipped by
   this logic rather than crashing (defensive `isinstance`/`.get()` checks
   throughout `_newly_unavailable`).
+
+## Live-verified: SelfPickup / Nova Poshta address construction (2026-08-05, issue #38)
+
+Issue #38 extended `delivery_settings.py` (issue #37) to support `SelfPickup`
+and `NovaPoshta`. Spot-checked live against the real MCP server before
+implementing, per `silpo_update_shopping_cart`'s own tool description (see
+above) plus `silpo_list_branches`/`silpo_find_nova_poshta_settlements`/
+`silpo_find_nova_poshta_offices`'s live responses (see "Location / branch /
+delivery tools" above for the full per-tool findings). One real
+schema surprise, in the same spirit as issue #37's `"options"` vs
+`"deliveryTypes"` find:
+
+- **`silpo_update_shopping_cart`'s own tool description text says the
+  SelfPickup address should be built from `branch.cityFull` and
+  `branch.addressFull`. Neither field exists on the real
+  `silpo_list_branches` response.** The live per-branch shape is
+  `{"branchId", "companyId", "externalId", "city", "address", "latitude",
+  "longitude", "hasPickup", "open"}` -- `city`/`address`, not
+  `cityFull`/`addressFull`. `delivery_settings.py`'s `_self_pickup_address`
+  uses the real field names (`city`/`address`), not the tool description's
+  literal (but non-existent) ones:
+  ```json
+  {"addressType": "self-pickup", "city": branch.city,
+   "locality": branch.address, "street": branch.address,
+   "latitude": branch.latitude, "longitude": branch.longitude}
+  ```
+- **NovaPoshta's construction rule matched the tool description exactly**
+  once checked against real `silpo_find_nova_poshta_settlements`/
+  `silpo_find_nova_poshta_offices` responses -- `settlement.title`/`.area`
+  and `office.id`/`.latitude`/`.longitude`/`.type`/`.number` are all real
+  field names, no correction needed:
+  ```json
+  {"addressType": "nova-poshta", "city": settlement.title,
+   "region": settlement.area, "latitude": String(office.latitude),
+   "longitude": String(office.longitude), "officeId": office.id,
+   "street": "<Відділення|Поштомат> #<office.number>"}
+  ```
+  (`office.latitude`/`.longitude` are live-verified as numbers, so the
+  tool description's `String(...)` cast is required, unlike
+  `silpo_list_branches`, whose lat/lon already come back as strings.)
+- **`silpo_list_branches(hasNP=true)` returned exactly 1 branch nationwide**
+  in this live account (`branchId: "1ee7fab3-7713-6a0c-b802-8d149aac137a"`,
+  city Київ) -- confirms the ticket's assumption that this call resolves a
+  single NP-servicing branch/company, not a user pick, unlike
+  `hasPickup=true` (311 branches, genuinely needs picking).
+- **Both `SelfPickup` and `NovaPoshta` set `shipments[].companyId` from the
+  chosen branch**, per the tool description's "Set shipments with the
+  branch companyId + branchId" -- unlike `DeliveryHome` (issue #37), which
+  keeps the existing cart shipment's `companyId` and only overrides
+  `branchId`. Not the same assumption as #37's "one company serves all
+  branches" -- the tool description is explicit here, so no assumption was
+  needed for these two types.
+
+## Assumptions made in issue #38 (Delivery Settings: SelfPickup / NovaPoshta)
+
+- **SelfPickup branch listing is "nearest of one fetched page," not "nearest
+  of all 311 branches."** `silpo_list_branches(hasPickup=true)` is called
+  with no explicit `limit` (server default, 50), then the returned page is
+  sorted client-side by plain squared lat/lon distance to the resolved
+  address and the nearest `_NEAREST_PICKUP_BRANCHES` (5) are offered. A
+  branch nearer to the user than anything on that first page (possible if
+  the account's default page ordering isn't itself distance-sorted) won't
+  be surfaced. Matches the tool description's "show 5 nearest branches"
+  framing without paginating through all 311 branches to find a true
+  global nearest -- narrow-scope-over-unreliable-effort, same precedent as
+  issue #20/#37. `open: false` branches are not filtered out of the pickup
+  list either (see the `silpo_list_branches` note above) -- both are known
+  gaps worth revisiting if real usage shows them mattering.
+- **Nova Poshta settlement search takes a free-text query from the user**
+  (`silpo_find_nova_poshta_settlements({"title": <user input>})`), not a
+  city pre-derived from the resolved address -- the tool takes a name
+  search, not coordinates, so there's no coordinate-based shortcut
+  available the way `SelfPickup`'s nearest-branch sort has one.
 
 ## Assumptions made in issue #33 (Favorites Deals / `favorites-deals` command)
 
