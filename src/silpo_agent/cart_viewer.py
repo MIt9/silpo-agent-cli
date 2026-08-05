@@ -50,10 +50,20 @@ def format_cart(context: CartContext) -> list[str]:
 
     if context.validations:
         lines.append("Validations:")
+        products_by_id = {p.get("productId"): p for p in context.products}
         for validation in context.validations:
             level = _or_unknown(validation.get("level"))
             message = _or_unknown(validation.get("message"))
-            lines.append(f"  [{level}] {message}")
+            line = f"  [{level}] {message}"
+            # Issue #04: resolve a product-scoped validation's opaque
+            # productId to the cart's own name/slug so the user knows which
+            # line item tripped it -- unresolvable context (no dict, no
+            # match) falls back to the raw line unchanged.
+            if validation.get("type") == "product" and isinstance(validation.get("context"), dict):
+                product = products_by_id.get(validation["context"].get("productId"))
+                if product:
+                    line += f" — {product.get('name')} ({product.get('slug')})"
+            lines.append(line)
 
     if context.total_after_discounts is not None:
         lines.append(f"Payable total: {context.total_after_discounts:.2f}")
