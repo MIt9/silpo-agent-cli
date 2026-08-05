@@ -119,13 +119,13 @@ def _run_cart_edit_replace(client, cart_context, old_slug, new_slug, print_fn) -
     return 0
 
 
-def _run_cart_edit_add(client, cart_context, new_slug, print_fn, quantity: int = 1) -> int:
+def _run_cart_edit_add(client, cart_context, new_slug, print_fn, quantity: float = 1) -> int:
     """Non-interactive add: adds NEW_SLUG as a brand-new cart line (quantity
     --quantity, default 1), without removing anything. Errors (no MCP
     mutation made) if the slug doesn't resolve, is already in the cart, or
-    --quantity isn't a positive integer -- see add_cart_item."""
-    if quantity < 1:
-        print_fn(f"cart edit: --quantity must be a positive integer, got {quantity}")
+    --quantity isn't a positive number -- see add_cart_item."""
+    if quantity <= 0:
+        print_fn(f"cart edit: --quantity must be a positive number, got {quantity}")
         return 1
     new_product = resolve_product_by_slug(client, cart_context, new_slug)
     if new_product is None:
@@ -136,7 +136,8 @@ def _run_cart_edit_add(client, cart_context, new_slug, print_fn, quantity: int =
     except CartEditError as exc:
         print_fn(f"cart edit: {exc}")
         return 1
-    print_fn(f"Added {result.added_slug} x{quantity} ({result.added_price:.2f} each)")
+    quantity_display = int(quantity) if quantity == int(quantity) else quantity
+    print_fn(f"Added {result.added_slug} x{quantity_display} ({result.added_price:.2f} each)")
     return 0
 
 
@@ -236,7 +237,7 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
 
 
 def _run_cart_edit(
-    client, log_store, input_fn, print_fn, replace: list[str] | None, add: str | None = None, quantity: int = 1
+    client, log_store, input_fn, print_fn, replace: list[str] | None, add: str | None = None, quantity: float = 1
 ) -> int:
     cart_context = resolve_cart_context(client, input_fn=input_fn, print_fn=print_fn, log_store=log_store)
     if not cart_context.shopping_cart_id:
@@ -426,8 +427,9 @@ an old slug not actually in your cart, or a new slug that resolves to
 nothing, errors clearly and leaves the cart untouched.
 
 adding a brand-new item, no swap:
-  silpo-agent cart edit --add <new-slug> [--quantity N]
-adds <new-slug> as a new cart line (quantity 1, or --quantity), without
+  silpo-agent cart edit --add <new-slug> [--quantity NUM]
+adds <new-slug> as a new cart line (quantity 1, or --quantity -- accepts a
+number like 0.5 for weighted products), without
 removing anything. mutually exclusive with --replace; --quantity is only
 valid together with --add. errors instead of touching the cart if
 <new-slug> is already a line in your cart -- rerunning --add would otherwise
@@ -561,10 +563,11 @@ def main(
     )
     edit_parser.add_argument(
         "--quantity",
-        type=int,
+        type=float,
         default=1,
-        metavar="N",
-        help="Quantity for --add (default: 1). Only valid together with --add.",
+        metavar="NUM",
+        help="Quantity for --add (default: 1). Accepts a number, e.g. 0.5 for weighted products sold by kg. "
+        "Only valid together with --add.",
     )
     cart_subparsers.add_parser(
         "promos",
