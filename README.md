@@ -1,5 +1,9 @@
 # silpo-agent-cli
 
+[![Tests](https://github.com/MIt9/silpo-agent-cli/actions/workflows/test.yml/badge.svg)](https://github.com/MIt9/silpo-agent-cli/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
+
 CLI wrapper over the Silpo MCP server (`https://mcp.silpo.ua/mcp`) for
 grocery shopping: rebuild your cart from what you typically buy, check and
 edit what's actually in it, and see what's on sale — without leaving the
@@ -164,11 +168,9 @@ your real Silpo cart or calls the MCP server.
   know this tool's quirks (cart-only scope in `reorder`, slugs vs. product
   names, where local history lives). Ships portable — no machine-specific
   paths — so it works from wherever you clone this repo.
-- `.claude/skills/silpo-agent-cli/` (this repo) — dev-workflow conventions
-  for *building* this CLI instead: TDD-first, ticket/review conventions,
-  and the live-schema gotchas already hit once (OAuth redirect_uri, MCP
-  response envelope unwrapping, wrapped vs. bare API responses). Only
-  relevant if you're extending the tool itself.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) if you're extending the tool itself
+(TDD-first, test seams, PR expectations).
 
 ## Local state
 
@@ -189,15 +191,10 @@ uv run pytest
 - `CONTEXT.md` — domain glossary (Typical item, Substitution decision,
   Cart Editor, Promo Scanner, etc.) — read this before the code if a term
   is unclear.
-- `prd_reorder_optimizer.md`, `prd_cart_and_deals.md`,
-  `prd_delivery_context_coupons.md` — the three PRDs this project was built
-  from, in order. Kept as the record of *why* things work the way they do
-  (module boundaries, rejected approaches, implementation decisions) — not
-  duplicated in CONTEXT.md (glossary only) or docs/mcp_schema.md (schema
-  only).
-- `docs/mcp_schema.md` — live-verified schema notes for every Silpo MCP
-  tool this project touches, including known gaps, assumptions, and every
-  place a guessed schema turned out wrong once tested live.
+- The original PRDs and live-verified MCP schema notes this project was
+  built from aren't in this public repo — they're working notes, not
+  reference docs, and may contain incidental account details. Ask in an
+  issue if you need context beyond `CONTEXT.md` and the code itself.
 - Build status lives in the repo's GitHub issues (`MIt9/silpo-agent-cli`),
   not a local TODO file — every ticket that shipped is closed there, with
   the PR that implemented it linked.

@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 audit_briefing.md
+.idea/
+.scratch/
+docs/
+prd_*.md

@@ -5,7 +5,7 @@ description = "Personal CLI wrapper over the Silpo MCP server"
 readme = "README.md"
 license = "MIT"
 authors = [
-    { name = "d.bilukcha", email = "siniidrozd@gmail.com" }
+    { name = "d.bilukcha", email = "3037823+MIt9@users.noreply.github.com" }
 ]
 requires-python = ">=3.11"
 dependencies = [
