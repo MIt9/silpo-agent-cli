@@ -264,6 +264,59 @@ def test_cart_edit_add_with_quantity_flag_adds_that_many(capsys, tmp_path):
     assert added_call[1]["products"][0]["quantity"] == 2
 
 
+def test_cart_edit_add_with_fractional_quantity_adds_that_much(capsys, tmp_path):
+    """Issue 01: weighted products (meat, produce, cheese sold by kg) need
+    fractional quantities -- --quantity must accept a float, not just int."""
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_product_details": _details(
+                {"id": "gulyash-uuid", "slug": "gulyash", "name": "Гуляш", "price": 320.0, "companyId": "c1", "branchId": "b1"}
+            ),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["cart", "edit", "--add", "gulyash", "--quantity", "0.4"],
+        client=client,
+        log_store=log_store,
+        input_fn=lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Added gulyash x0.4" in out
+    added_call = next(c for c in client.calls if c[0] == "silpo_add_or_update_cart_products")
+    assert added_call[1]["products"][0]["quantity"] == 0.4
+
+
+def test_cart_edit_add_with_zero_or_negative_quantity_is_rejected_without_mutating(capsys, tmp_path):
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_product_details": _details(
+                {"id": "carrot-uuid", "slug": "carrot", "name": "Carrot", "price": 41.42, "companyId": "c1", "branchId": "b1"}
+            ),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["cart", "edit", "--add", "carrot", "--quantity", "-0.5"],
+        client=client,
+        log_store=log_store,
+        input_fn=lambda prompt="": (_ for _ in ()).throw(AssertionError("must not prompt")),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "--quantity" in out
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
 def test_cart_edit_quantity_without_add_is_rejected(capsys, tmp_path):
     client = FakeClient(_resolved_cart_context_with_products([]))
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
