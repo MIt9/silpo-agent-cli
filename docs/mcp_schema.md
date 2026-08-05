@@ -979,3 +979,48 @@ line needs revisiting. Branch/delivery/timeslot context comes from
 `cart_context.resolve_cart_context` called with no pre-resolved address, per
 issue #29's "self-resolving path for future callers" note -- this is the
 first command to exercise that path live.
+
+## Design decision made in issue #30 (Cart Editor: `cart edit` interactive + `--replace`)
+
+`cart_editor.py` introduces no new schema assumptions -- it reuses three
+already-verified tools documented above verbatim: `silpo_remove_cart_products`,
+`silpo_add_or_update_cart_products` (both "Cart tools"), and
+`silpo_find_products_batch` (same real request/response shape "Product
+search / replacement tools" documents, and the same call pattern
+`substitution_resolver.py`'s `_check_availability` already uses). One real
+design decision was made, not schema-related:
+
+- **`--replace <old-product-id> <new-product-id>`'s new-id semantics**: the
+  live API has no per-id product lookup tool (`silpo_get_product_details`
+  needs a `slug`, not an id, and nothing produces a `slug` from a bare id).
+  So `<new-product-id>` cannot be resolved to the full record
+  (`companyId`/`branchId`/`price`) the add call requires by id alone --
+  it has to go through search. The chosen design: treat `<new-product-id>`
+  as a free-text query to `silpo_find_products_batch` (the same tool the
+  interactive flow's search step uses) and match a candidate by exact `id`
+  in the results, rather than trusting the top hit. This mirrors
+  `substitution_resolver.py`'s own documented fallback (using a raw
+  product id as search text when no better query is available) instead of
+  inventing a second resolution path. Consequence: `--replace`'s new id
+  must be a real, currently-searchable product id (e.g. copied from a
+  prior search result, another cart, or an order) -- an id that exists in
+  the catalog but doesn't surface for a plain id-as-query search (unlikely
+  given ids are UUIDs the search endpoint can presumably match verbatim,
+  but unverified live) would be reported as "not found" even though it
+  technically exists. This was judged an acceptable, documented limitation
+  over adding a second, unverified tool call just for this one flag.
+- **No-partial-mutation ordering**: `cli.py`'s `_run_cart_edit_replace`
+  resolves the new product (search + exact-id match) *before* calling
+  `swap_cart_item`, which itself validates the old id is actually a
+  `CartContext.products` line *before* either mutating call. Both the
+  interactive and `--replace` paths route through the same
+  `swap_cart_item`, so the ordering guarantee (new item confirmed
+  resolvable before the old item is ever removed) holds identically for
+  both -- see `cart_editor.py`'s module docstring.
+- **Quantity preserved across the swap**: the removed line's `quantity` is
+  reused for the new line's add call (falling back to `1` if absent),
+  rather than always adding `1` -- unlike Cart Writer (#19), which always
+  adds fresh Typical Items at `quantity=1` since it has no prior line to
+  preserve. `addQuantity: True` is kept for consistency with Cart Writer's
+  established payload shape, though since the new line never already
+  exists in the cart at add time, `True`/`False` are equivalent here.

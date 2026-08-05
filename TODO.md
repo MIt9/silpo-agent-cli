@@ -69,5 +69,13 @@ Needed once live testing showed `silpo_get_my_shopping_cart` returns only a cart
 - [x] Pipeline wiring: Address Resolver → Cart Context Resolver → Order Aggregator → Substitution Resolver → (Promo Optimizer) → Cart Writer → report
 - [x] No independent business logic beyond wiring
 
+## 9. Cart Editor — new module, not in original breakdown (#30, part of #26)
+`cart edit` subcommand: the only capability besides `reorder` itself that mutates the real cart. Given no per-id product lookup tool exists on the live server, both the interactive flow and `--replace` resolve a replacement via the same `silpo_find_products_batch` free-text search `substitution_resolver.py` already uses (`--replace`'s new-product-id is searched using the id itself as the query, matched by exact id in the results — see `cart_editor.py`'s module docstring for the full reasoning).
+- [x] Interactive flow: list current cart items (from `CartContext.products`), pick one, free-text search a replacement, show candidates, confirm, swap
+- [x] `--replace <old-product-id> <new-product-id>` flag: same swap, zero prompts
+- [x] Plastic-bag filter (`cart_writer.py`'s `_is_plastic_bag` pattern) applied to search candidates
+- [x] No-partial-mutation guarantee: new item resolved and validated before the old item is removed (`silpo_remove_cart_products` then `silpo_add_or_update_cart_products` — remove-then-add is the only way to change a line, no in-place update call exists)
+- [x] Tests: interactive happy path, `--replace` happy path, old-id-not-in-cart, new-item-not-found, bag filtering, no-partial-mutation-on-failure
+
 ## Out of scope (do not schedule)
 `week` command, checkout/payment, DinnerParty/Budget Guardian/Support Ops, multi-user/family profiles, preview/dry-run mode, non-terminal UI.
