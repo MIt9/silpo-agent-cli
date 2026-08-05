@@ -118,6 +118,52 @@ def _run_cart_edit_replace(client, cart_context, old_id, new_id, print_fn) -> in
     return 0
 
 
+def _pick_free_text_replacement(client, cart_context, input_fn, print_fn) -> dict | None:
+    """Free-text search path (issue #30): prompts for search terms, shows
+    matching candidates, lets the user pick one. Returns the chosen product
+    record, or None (with an explanatory message already printed) if the
+    search comes up empty or the pick is out of range."""
+    query = input_fn("Search for a replacement: ").strip()
+    candidates = search_replacement_candidates(client, cart_context, query) if query else []
+    if not candidates:
+        print_fn(f"cart edit: no results for {query!r}")
+        return None
+
+    print_fn("Candidates:")
+    for i, candidate in enumerate(candidates, start=1):
+        print_fn(f"{i}. {candidate.get('name')} ({candidate.get('price')})")
+    pick = input_fn("Pick a replacement: ").strip()
+    pick_idx = int(pick) if pick.isdigit() else None
+    if not pick_idx or not (1 <= pick_idx <= len(candidates)):
+        print_fn(f"No candidate numbered {pick!r}.")
+        return None
+    return candidates[pick_idx - 1]
+
+
+def _pick_promo_replacement(candidates, input_fn, print_fn) -> dict | None:
+    """Promo-browse path (issue #31): shows the (already non-empty) list of
+    `PromoCandidate`s from `find_promo_alternatives` and lets the user pick
+    one, converted to the plain product-record shape `swap_cart_item`
+    expects. Returns None (with a message already printed) if the pick is
+    out of range."""
+    print_fn("Promo alternatives:")
+    for i, candidate in enumerate(candidates, start=1):
+        print_fn(f"{i}. {candidate.name}: {candidate.price:.2f} (was {candidate.old_price:.2f})")
+    pick = input_fn("Pick a promo alternative: ").strip()
+    pick_idx = int(pick) if pick.isdigit() else None
+    if not pick_idx or not (1 <= pick_idx <= len(candidates)):
+        print_fn(f"No candidate numbered {pick!r}.")
+        return None
+    chosen = candidates[pick_idx - 1]
+    return {
+        "id": chosen.product_id,
+        "name": chosen.name,
+        "price": chosen.price,
+        "companyId": chosen.company_id,
+        "branchId": chosen.branch_id,
+    }
+
+
 def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
     if not cart_context.products:
         print_fn("Your cart is empty; nothing to edit.")
@@ -134,21 +180,20 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
     old_product = cart_context.products[idx - 1]
     old_id = old_product.get("productId")
 
-    query = input_fn("Search for a replacement: ").strip()
-    candidates = search_replacement_candidates(client, cart_context, query) if query else []
-    if not candidates:
-        print_fn(f"cart edit: no results for {query!r}")
-        return 1
+    mode = input_fn("Replace via [1] free-text search or [2] promo alternatives? [1/2] ").strip()
+    if mode == "2":
+        slug = old_product.get("slug")
+        promo_candidates = find_promo_alternatives(client, cart_context, slug) if slug else []
+        if promo_candidates:
+            chosen = _pick_promo_replacement(promo_candidates, input_fn, print_fn)
+        else:
+            print_fn("cart edit: no discounted alternatives found for this item; falling back to free-text search.")
+            chosen = _pick_free_text_replacement(client, cart_context, input_fn, print_fn)
+    else:
+        chosen = _pick_free_text_replacement(client, cart_context, input_fn, print_fn)
 
-    print_fn("Candidates:")
-    for i, candidate in enumerate(candidates, start=1):
-        print_fn(f"{i}. {candidate.get('name')} ({candidate.get('price')})")
-    pick = input_fn("Pick a replacement: ").strip()
-    pick_idx = int(pick) if pick.isdigit() else None
-    if not pick_idx or not (1 <= pick_idx <= len(candidates)):
-        print_fn(f"No candidate numbered {pick!r}.")
+    if chosen is None:
         return 1
-    chosen = candidates[pick_idx - 1]
 
     old_label = old_product.get("name") or old_id
     new_label = chosen.get("name") or chosen.get("id")
@@ -291,8 +336,13 @@ _CART_EDIT_EPILOG = """\
 what it does, in order (interactive, no flags):
   1. lists the items currently in your real cart, numbered
   2. asks which one to replace
-  3. asks for free-text search terms, shows matching candidates (plastic
-     bags are never shown as candidates)
+  3. asks how to find the replacement:
+       [1] free-text search -- shows matching candidates (plastic bags are
+           never shown as candidates)
+       [2] promo alternatives -- reuses `cart promos`'s Similar-Products
+           Promo Finder for the specific item being replaced, showing only
+           genuinely discounted candidates. If it finds none, falls back to
+           the free-text search instead of erroring.
   4. asks you to confirm the swap
   5. removes the old item and adds the new one (silpo_remove_cart_products
      then silpo_add_or_update_cart_products -- there's no in-place "update

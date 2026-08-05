@@ -75,7 +75,8 @@ Needed once live testing showed `silpo_get_my_shopping_cart` returns only a cart
 - [x] `--replace <old-product-id> <new-product-id>` flag: same swap, zero prompts
 - [x] Plastic-bag filter (`cart_writer.py`'s `_is_plastic_bag` pattern) applied to search candidates
 - [x] No-partial-mutation guarantee: new item resolved and validated before the old item is removed (`silpo_remove_cart_products` then `silpo_add_or_update_cart_products` — remove-then-add is the only way to change a line, no in-place update call exists)
-- [x] Tests: interactive happy path, `--replace` happy path, old-id-not-in-cart, new-item-not-found, bag filtering, no-partial-mutation-on-failure
+- [x] Promo-browse replacement path (#31, part of #26): interactive flow lets the user choose free-text search or browsing the item's own promo alternatives via `promo_finder.py`'s `find_promo_alternatives` (issue #28's module, reused as-is); no discounted alternatives falls back to free-text search instead of erroring
+- [x] Tests: interactive happy path, `--replace` happy path, old-id-not-in-cart, new-item-not-found, bag filtering, no-partial-mutation-on-failure, promo-browse swap matches free-text call sequence, promo-browse no-candidates fallback
 
 ## Out of scope (do not schedule)
 `week` command, checkout/payment, DinnerParty/Budget Guardian/Support Ops, multi-user/family profiles, preview/dry-run mode, non-terminal UI.
