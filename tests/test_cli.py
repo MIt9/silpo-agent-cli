@@ -1213,3 +1213,15 @@ def test_cart_promos_on_empty_cart_reports_cleanly_without_error(capsys):
     assert "empty" in out.lower()
     assert all(call[0] != "silpo_get_similar_products" for call in client.calls)
     assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+
+
+def test_version_flag_prints_version_and_exits_zero(capsys):
+    try:
+        main(["--version"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:
+        raise AssertionError("--version should exit")
+
+    out = capsys.readouterr().out
+    assert "silpo-agent" in out

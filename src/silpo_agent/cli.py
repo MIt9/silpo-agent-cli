@@ -17,6 +17,7 @@ promo-related MCP calls (CONTEXT.md's "Promo optimization" entry).
 
 import argparse
 import sys
+from importlib.metadata import version
 
 from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient
@@ -436,6 +437,9 @@ def main(
         "usually buy, instead of re-typing the same list every week.",
         epilog=_TOP_LEVEL_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {version('silpo-agent-cli')}"
     )
     subparsers = parser.add_subparsers(dest="command")
     reorder_parser = subparsers.add_parser(
