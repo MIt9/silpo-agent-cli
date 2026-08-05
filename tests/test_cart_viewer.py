@@ -94,6 +94,72 @@ def test_cart_with_validations_shows_them_without_blocking():
     assert "Payable total: 49.90" in text
 
 
+def test_product_validation_resolves_to_matching_cart_item_name_and_slug():
+    """Issue #04: a `type: "product"` validation's `context.productId` is an
+    opaque id -- resolving it against the cart's own product list (already
+    on CartContext.products) tells the user *which* line item tripped the
+    validation, e.g. out-of-stock, without a second lookup."""
+    validations = [
+        {
+            "level": "error",
+            "type": "product",
+            "message": "product.offer.stock.max",
+            "context": {"productId": "1ed0766d-a0c1-68e0-bec5-dd63763181f9", "stock": 0},
+        }
+    ]
+    products = [
+        {
+            "productId": "1ed0766d-a0c1-68e0-bec5-dd63763181f9",
+            "slug": "banan-32485",
+            "name": "Банан",
+            "quantity": 1,
+            "price": 10.0,
+            "stock": 0,
+        }
+    ]
+    context = _context(products=products, validations=validations)
+
+    lines = format_cart(context)
+
+    assert "  [error] product.offer.stock.max — Банан (banan-32485)" in lines
+
+
+def test_product_validation_with_unmatched_product_id_falls_back_unchanged():
+    """If the validation's productId doesn't match any current cart line
+    (e.g. the item was already removed), print the raw line rather than
+    erroring or showing stale/blank name info."""
+    validations = [
+        {
+            "level": "error",
+            "type": "product",
+            "message": "product.offer.stock.max",
+            "context": {"productId": "does-not-exist", "stock": 0},
+        }
+    ]
+    products = [
+        {"productId": "p1", "slug": "banan-32485", "name": "Банан", "quantity": 1, "price": 10.0, "stock": 0}
+    ]
+    context = _context(products=products, validations=validations)
+
+    lines = format_cart(context)
+
+    assert "  [error] product.offer.stock.max" in lines
+    assert not any("—" in line for line in lines)
+
+
+def test_non_product_validation_with_list_context_renders_unchanged():
+    """`order.adult.is_not_confirmed`-style validations carry `context: []`,
+    not a dict -- must render exactly as before, no crash on `.get`."""
+    validations = [
+        {"level": "error", "type": "order", "message": "order.adult.is_not_confirmed", "context": []},
+    ]
+    context = _context(products=[], validations=validations)
+
+    lines = format_cart(context)
+
+    assert "  [error] order.adult.is_not_confirmed" in lines
+
+
 def test_missing_product_and_validation_fields_render_as_unknown_not_literal_none():
     """A real response with a gap in one field (missing quantity/price/stock
     on a product, or missing level/message on a validation) must not render
