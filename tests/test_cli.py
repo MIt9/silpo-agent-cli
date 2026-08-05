@@ -790,6 +790,62 @@ def test_coupons_command_with_no_active_coupons_prints_clean_message(capsys):
     assert all(call[0] != "silpo_get_coupon_details" for call in client.calls)
 
 
+def _favorites_cart_response(branch_id="b1", delivery_type="DeliveryHome", timeslot_start="2026-08-05T10:00:00"):
+    return {
+        "success": True,
+        "cart": {
+            "id": "cart-1",
+            "deliveryType": delivery_type,
+            "timeslot": {"start": timeslot_start, "end": "2026-08-05T12:00:00"},
+            "shipments": [{"id": "ship-1", "companyId": "c1", "branchId": branch_id, "products": []}],
+            "calculation": {"validations": []},
+        },
+        "loyalty": {},
+    }
+
+
+def test_favorites_deals_command_lists_discounted_favorites(capsys):
+    client = FakeClient(
+        {
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": _favorites_cart_response(),
+            "silpo_get_my_favorites": {
+                "success": True,
+                "summary": "Found 2 favorites",
+                "products": [
+                    {"id": "p1", "name": "Butter", "price": 49.9, "oldPrice": 69.9},
+                    {"id": "p2", "name": "Milk", "price": 39.9, "oldPrice": None},
+                ],
+            },
+        }
+    )
+
+    exit_code = main(["favorites-deals"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Butter" in out
+    assert "49.90" in out and "69.90" in out
+    assert "Milk" not in out
+    assert ("silpo_get_my_favorites", {"branchId": "b1", "deliveryType": "DeliveryHome", "timeslotStart": "2026-08-05T10:00:00"}) in client.calls
+
+
+def test_favorites_deals_command_with_no_discounts_prints_clean_message(capsys):
+    client = FakeClient(
+        {
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": _favorites_cart_response(),
+            "silpo_get_my_favorites": {"success": True, "summary": "Found 0 favorites", "products": []},
+        }
+    )
+
+    exit_code = main(["favorites-deals"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no discounted favorites" in out.lower()
+
+
 def _delivery_fixture_responses():
     """Full fixture set for a happy-path `delivery` run: saved address,
     cart context (address/shipments template), delivery-type options
