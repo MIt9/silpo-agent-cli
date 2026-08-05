@@ -357,8 +357,9 @@ follow-up ticket.
   (`branchId: "1ee7fab3-7713-6a0c-b802-8d149aac137a"`, Київ) — so resolving
   a NovaPoshta shipment's branch is a lookup, not a user pick. `open: false`
   branches were present in the `hasPickup=true` sample (e.g. a closed
-  Kyiv branch) — `delivery_settings.py` doesn't currently filter these out
-  before listing pickup options, a known gap worth revisiting if it bites.
+  Kyiv branch) — `delivery_settings.py`'s `_pick_self_pickup_branch` filters
+  these out before listing pickup options (review finding on PR #49, fixed
+  2026-08-05), so a closed branch is never offered as a pick.
 - **`silpo_get_time_slots({"branchId", "deliveryTypes", "start", "end",
   "limit"})`** — `{"success", "summary", "slots": [{"start", "end",
   "available", "deliveryType", "deliveryCost", "deliveryCostMap": [{"cost",
@@ -1040,16 +1041,23 @@ schema surprise, in the same spirit as issue #37's `"options"` vs
 - **SelfPickup branch listing is "nearest of one fetched page," not "nearest
   of all 311 branches."** `silpo_list_branches(hasPickup=true)` is called
   with no explicit `limit` (server default, 50), then the returned page is
-  sorted client-side by plain squared lat/lon distance to the resolved
-  address and the nearest `_NEAREST_PICKUP_BRANCHES` (5) are offered. A
-  branch nearer to the user than anything on that first page (possible if
-  the account's default page ordering isn't itself distance-sorted) won't
-  be surfaced. Matches the tool description's "show 5 nearest branches"
-  framing without paginating through all 311 branches to find a true
-  global nearest -- narrow-scope-over-unreliable-effort, same precedent as
-  issue #20/#37. `open: false` branches are not filtered out of the pickup
-  list either (see the `silpo_list_branches` note above) -- both are known
-  gaps worth revisiting if real usage shows them mattering.
+  filtered to `open: true` branches with real coordinates (a branch missing
+  lat/lon can't be meaningfully distance-ranked, and defaulting to `(0, 0)`
+  would falsely rank it as "nearest" -- PR #49 review finding, fixed
+  2026-08-05) and sorted client-side by plain squared lat/lon distance to
+  the resolved address; the nearest `_NEAREST_PICKUP_BRANCHES` (5) of what's
+  left are offered. A branch nearer to the user than anything on that first
+  page (possible if the account's default page ordering isn't itself
+  distance-sorted) still won't be surfaced -- that part of the gap remains,
+  same narrow-scope-over-unreliable-effort precedent as issue #20/#37.
+- **`_pick_nova_poshta_branch` prints a visible note if `hasNP=true` ever
+  returns more than one branch** (live-verified as exactly 1 for this
+  account, see above, but not treated as a hard guarantee) instead of
+  silently using `branches[0]` -- PR #49 review finding, fixed 2026-08-05.
+  Still uses the first branch either way; the fix is making that choice
+  visible, not turning it into a user pick (a real second NP-servicing
+  branch has never been observed, so building a picker for it would be
+  speculative).
 - **Nova Poshta settlement search takes a free-text query from the user**
   (`silpo_find_nova_poshta_settlements({"title": <user input>})`), not a
   city pre-derived from the resolved address -- the tool takes a name

@@ -153,26 +153,41 @@ def _distance_sq(lat1, lon1, lat2, lon2) -> float:
     return (lat1 - lat2) ** 2 + (lon1 - lon2) ** 2
 
 
+def _to_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _pick_self_pickup_branch(client, resolved_address, input_fn, print_fn) -> dict | None:
     """SelfPickup branch pick (issue #38): silpo_list_branches(hasPickup=true)
     per its own tool description ("show 5 nearest branches to their location
     and let them choose"). Sorts the fetched page by plain lat/lon distance
     to the resolved address -- not a true nearest-of-all-311 search across
     every page (see docs/mcp_schema.md), good enough for picking among a
-    default-sized page of real branch data."""
+    default-sized page of real branch data. Closed (`open: false`) branches
+    and branches missing coordinates (can't be meaningfully distance-ranked,
+    and defaulting to (0, 0) would rank them as falsely "nearest") are
+    excluded before sorting."""
     response = client.call("silpo_list_branches", {"hasPickup": True}) or {}
-    branches = response.get("branches") or []
+    branches = [b for b in (response.get("branches") or []) if b.get("open")]
     if not branches:
         print_fn("No self-pickup branches available.")
         return None
 
+    locatable = [b for b in branches if _to_float(b.get("latitude")) is not None and _to_float(b.get("longitude")) is not None]
+    if not locatable:
+        print_fn("No self-pickup branches available.")
+        return None
+
     nearest = sorted(
-        branches,
+        locatable,
         key=lambda b: _distance_sq(
             resolved_address.latitude,
             resolved_address.longitude,
-            float(b.get("latitude") or 0),
-            float(b.get("longitude") or 0),
+            _to_float(b.get("latitude")),
+            _to_float(b.get("longitude")),
         ),
     )[:_NEAREST_PICKUP_BRANCHES]
 
@@ -261,12 +276,18 @@ def _nova_poshta_address(settlement: dict, office: dict) -> dict:
 def _pick_nova_poshta_branch(client, print_fn) -> dict | None:
     """silpo_list_branches(hasNP=true) for the branchId/companyId to ship
     through -- live-verified 2026-08-05: exactly one branch nationwide has
-    hasNP=true, so this is a lookup, not a user pick."""
+    hasNP=true, so this is a lookup, not a user pick. That's an
+    observation about this account, not a guarantee -- if a future account
+    or a different API state ever returns more than one, don't silently
+    pick the first with no trace of it: say so, so it's visible rather than
+    an invisible wrong guess."""
     response = client.call("silpo_list_branches", {"hasNP": True}) or {}
     branches = response.get("branches") or []
     if not branches:
         print_fn("No Nova Poshta-servicing branch found.")
         return None
+    if len(branches) > 1:
+        print_fn(f"{len(branches)} Nova Poshta-servicing branches found; using {branches[0].get('city')}.")
     return branches[0]
 
 

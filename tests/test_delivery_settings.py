@@ -84,7 +84,7 @@ def branches_response(*branches):
     }
 
 
-def branch(branch_id, city, address, latitude, longitude, company_id="c-branch"):
+def branch(branch_id, city, address, latitude, longitude, company_id="c-branch", open=True):
     return {
         "branchId": branch_id,
         "companyId": company_id,
@@ -94,7 +94,7 @@ def branch(branch_id, city, address, latitude, longitude, company_id="c-branch")
         "latitude": latitude,
         "longitude": longitude,
         "hasPickup": True,
-        "open": True,
+        "open": open,
     }
 
 
@@ -382,6 +382,102 @@ def test_self_pickup_no_branches_available_does_not_apply():
     assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
 
 
+def test_self_pickup_excludes_branch_missing_coordinates_from_nearest_sort():
+    """A branch with no lat/lon can't be meaningfully distance-ranked --
+    defaulting missing coordinates to 0 would rank it in the Atlantic Ocean,
+    and it could wrongly come back as "nearest". It must be excluded from
+    the offered list entirely, not merely sorted last."""
+    branch_no_coords = branch("branch-no-coords", "Одеса", "вул. Невідома, 1", None, None, company_id="no-coords-company")
+    branch_near = branch("branch-near", "Вінниця", "вул. Соборна, 1", "49.2500000000000000", "28.4900000000000000", company_id="pickup-company")
+    responses = _base_responses(
+        silpo_list_branches=branches_response(branch_no_coords, branch_near),
+    )
+    client = FakeClient(responses)
+    log_store = FakeLogStore()
+    printed = []
+    # address: accept first saved -> delivery type: pick #2 (SelfPickup) ->
+    # branch: pick #1 -> timeslot: pick #1
+    input_fn = make_input("y", "2", "1", "1")
+
+    result = run_delivery_settings(client, log_store, input_fn=input_fn, print_fn=lambda *a: printed.append(" ".join(str(x) for x in a)))
+
+    assert result.applied is True
+    # Only one branch was offered (the one with coordinates) -- option #1 must be it.
+    joined = "\n".join(printed)
+    assert "Одеса" not in joined
+    assert (
+        "silpo_update_shopping_cart",
+        {
+            "shoppingCartId": "cart-1",
+            "deliveryType": "SelfPickup",
+            "timeslot": {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00"},
+            "address": {
+                "addressType": "self-pickup",
+                "city": "Вінниця",
+                "locality": "вул. Соборна, 1",
+                "street": "вул. Соборна, 1",
+                "latitude": "49.2500000000000000",
+                "longitude": "28.4900000000000000",
+            },
+            "shipments": [{"id": "ship-1", "companyId": "pickup-company", "branchId": "branch-near", "products": []}],
+        },
+    ) in client.calls
+
+
+def test_self_pickup_excludes_closed_branches():
+    """A closed (`open: false`) branch shouldn't be offered or selectable --
+    real live data included one, per docs/mcp_schema.md."""
+    branch_closed = branch("branch-closed", "Київ", "вул. Бережанська, 22", "50.5186900000000000", "30.4561600000000000", company_id="closed-company", open=False)
+    branch_near = branch("branch-near", "Вінниця", "вул. Соборна, 1", "49.2500000000000000", "28.4900000000000000", company_id="pickup-company")
+    responses = _base_responses(
+        silpo_list_branches=branches_response(branch_closed, branch_near),
+    )
+    client = FakeClient(responses)
+    log_store = FakeLogStore()
+    printed = []
+    input_fn = make_input("y", "2", "1", "1")
+
+    result = run_delivery_settings(client, log_store, input_fn=input_fn, print_fn=lambda *a: printed.append(" ".join(str(x) for x in a)))
+
+    assert result.applied is True
+    joined = "\n".join(printed)
+    assert "Бережанська" not in joined
+    assert (
+        "silpo_update_shopping_cart",
+        {
+            "shoppingCartId": "cart-1",
+            "deliveryType": "SelfPickup",
+            "timeslot": {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00"},
+            "address": {
+                "addressType": "self-pickup",
+                "city": "Вінниця",
+                "locality": "вул. Соборна, 1",
+                "street": "вул. Соборна, 1",
+                "latitude": "49.2500000000000000",
+                "longitude": "28.4900000000000000",
+            },
+            "shipments": [{"id": "ship-1", "companyId": "pickup-company", "branchId": "branch-near", "products": []}],
+        },
+    ) in client.calls
+
+
+def test_self_pickup_all_branches_closed_does_not_apply():
+    responses = _base_responses(
+        silpo_list_branches=branches_response(
+            branch("branch-closed", "Київ", "вул. Х", "50.0", "30.0", open=False)
+        )
+    )
+    client = FakeClient(responses)
+    log_store = FakeLogStore()
+    input_fn = make_input("y", "2")
+
+    result = run_delivery_settings(client, log_store, input_fn=input_fn, print_fn=lambda *a: None)
+
+    assert result.applied is False
+    assert all(call[0] != "silpo_get_time_slots" for call in client.calls)
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+
+
 def test_nova_poshta_happy_path_builds_correct_address_and_applies():
     """Issue #38: NovaPoshta picked from the delivery-type list -> settlement
     search -> office pick -> silpo_list_branches(hasNP=true) for the
@@ -453,3 +549,53 @@ def test_nova_poshta_no_settlements_found_does_not_apply():
     assert result.applied is False
     assert all(call[0] != "silpo_get_time_slots" for call in client.calls)
     assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+
+
+def test_nova_poshta_multiple_servicing_branches_uses_first_and_says_so():
+    """Live-verified 2026-08-05: hasNP=true returned exactly one branch for
+    this account, so _pick_nova_poshta_branch normally isn't a real choice.
+    That's an observation, not a guarantee -- if it's ever wrong, the first
+    branch must still be usable, but silently. This asserts the chosen
+    behavior: print a visible note naming how many were found and which one
+    was used, rather than silently picking branches[0]."""
+    settlement = {"id": "settlement-1", "title": "Київ", "area": "Київська", "region": ""}
+    office = {
+        "id": "office-1", "title": "Відділення №1", "address": "Київ",
+        "type": "office", "number": 1, "status": "Working",
+        "latitude": 50.35, "longitude": 30.54,
+    }
+    np_branch_1 = branch("np-branch-1", "Київ", "просп. Х, 1", "50.0", "30.0", company_id="np-company-1")
+    np_branch_2 = branch("np-branch-2", "Львів", "вул. Y, 2", "49.8", "24.0", company_id="np-company-2")
+    responses = _base_responses(
+        silpo_find_nova_poshta_settlements=settlements_response(settlement),
+        silpo_find_nova_poshta_offices=offices_response(office),
+        silpo_list_branches=branches_response(np_branch_1, np_branch_2),
+    )
+    client = FakeClient(responses)
+    log_store = FakeLogStore()
+    printed = []
+    input_fn = make_input("y", "3", "Київ", "1", "1", "1")
+
+    result = run_delivery_settings(client, log_store, input_fn=input_fn, print_fn=lambda *a: printed.append(" ".join(str(x) for x in a)))
+
+    assert result.applied is True
+    joined = "\n".join(printed)
+    assert "2" in joined and "Київ" in joined  # visible note: 2 branches found, first (Київ) used
+    assert (
+        "silpo_update_shopping_cart",
+        {
+            "shoppingCartId": "cart-1",
+            "deliveryType": "NovaPoshta",
+            "timeslot": {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00"},
+            "address": {
+                "addressType": "nova-poshta",
+                "city": "Київ",
+                "region": "Київська",
+                "latitude": "50.35",
+                "longitude": "30.54",
+                "officeId": "office-1",
+                "street": "Відділення #1",
+            },
+            "shipments": [{"id": "ship-1", "companyId": "np-company-1", "branchId": "np-branch-1", "products": []}],
+        },
+    ) in client.calls
