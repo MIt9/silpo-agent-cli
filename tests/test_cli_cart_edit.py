@@ -203,6 +203,94 @@ def test_cart_edit_replace_new_item_not_found_errors_without_mutating(capsys, tm
     assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
 
 
+def test_cart_edit_add_flag_adds_new_line_with_zero_prompts(capsys, tmp_path):
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_product_details": _details(
+                {
+                    "id": "oat-milk-uuid",
+                    "slug": "oat-milk",
+                    "name": "Oat Milk",
+                    "price": 55.0,
+                    "companyId": "c2",
+                    "branchId": "b2",
+                }
+            ),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    def input_fn(prompt=""):
+        raise AssertionError("--add must not prompt")
+
+    exit_code = main(["cart", "edit", "--add", "oat-milk"], client=client, log_store=log_store, input_fn=input_fn)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Added oat-milk" in out
+    assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)
+    added_call = next(c for c in client.calls if c[0] == "silpo_add_or_update_cart_products")
+    assert added_call[1]["products"][0]["productId"] == "oat-milk-uuid"
+    assert added_call[1]["products"][0]["quantity"] == 1
+    assert added_call[1]["products"][0]["companyId"] == "c2"
+    assert added_call[1]["products"][0]["branchId"] == "b2"
+
+
+def test_cart_edit_add_flag_already_in_cart_errors_without_mutating(capsys, tmp_path):
+    products = [{"productId": "oat-milk-uuid", "slug": "oat-milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_product_details": _details(
+                {"id": "oat-milk-uuid", "slug": "oat-milk", "name": "Oat Milk", "price": 55.0}
+            ),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    def input_fn(prompt=""):
+        raise AssertionError("--add must not prompt")
+
+    exit_code = main(["cart", "edit", "--add", "oat-milk"], client=client, log_store=log_store, input_fn=input_fn)
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "already" in out.lower()
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_cart_edit_add_flag_unresolvable_slug_errors_without_mutating(capsys, tmp_path):
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_product_details": {"success": True},
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    def input_fn(prompt=""):
+        raise AssertionError("--add must not prompt")
+
+    exit_code = main(
+        ["cart", "edit", "--add", "nonexistent"], client=client, log_store=log_store, input_fn=input_fn
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "not found" in out
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_cart_edit_replace_and_add_together_is_rejected_by_argparse():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["cart", "edit", "--replace", "a", "b", "--add", "c"], client=FakeClient({}), input_fn=lambda p="": "")
+
+
 def test_cart_edit_interactive_no_search_results_errors_without_mutating(capsys, tmp_path):
     products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
     client = FakeClient(

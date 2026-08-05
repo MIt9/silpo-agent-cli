@@ -23,6 +23,7 @@ from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient
 from silpo_agent.cart_context import resolve_cart_context
 from silpo_agent.cart_editor import (
+    add_cart_item,
     CartEditError,
     resolve_product_by_slug,
     search_replacement_candidates,
@@ -115,6 +116,23 @@ def _run_cart_edit_replace(client, cart_context, old_slug, new_slug, print_fn) -
         print_fn(f"cart edit: {exc}")
         return 1
     print_fn(f"Replaced {result.removed_slug} with {result.added_slug} ({result.added_price:.2f})")
+    return 0
+
+
+def _run_cart_edit_add(client, cart_context, new_slug, print_fn) -> int:
+    """Non-interactive add: adds NEW_SLUG as a brand-new cart line, quantity
+    1, without removing anything. Errors (no MCP mutation made) if the slug
+    doesn't resolve or is already in the cart -- see add_cart_item."""
+    new_product = resolve_product_by_slug(client, cart_context, new_slug)
+    if new_product is None:
+        print_fn(f"cart edit: product {new_slug!r} not found")
+        return 1
+    try:
+        result = add_cart_item(client, cart_context, new_product)
+    except CartEditError as exc:
+        print_fn(f"cart edit: {exc}")
+        return 1
+    print_fn(f"Added {result.added_slug} ({result.added_price:.2f})")
     return 0
 
 
@@ -213,7 +231,9 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
     return 0
 
 
-def _run_cart_edit(client, log_store, input_fn, print_fn, replace: list[str] | None) -> int:
+def _run_cart_edit(
+    client, log_store, input_fn, print_fn, replace: list[str] | None, add: str | None = None
+) -> int:
     cart_context = resolve_cart_context(client, input_fn=input_fn, print_fn=print_fn, log_store=log_store)
     if not cart_context.shopping_cart_id:
         print_fn("cart edit: no cart resolved; nothing to edit")
@@ -222,6 +242,9 @@ def _run_cart_edit(client, log_store, input_fn, print_fn, replace: list[str] | N
     if replace is not None:
         old_id, new_id = replace
         return _run_cart_edit_replace(client, cart_context, old_id, new_id, print_fn)
+
+    if add is not None:
+        return _run_cart_edit_add(client, cart_context, add, print_fn)
 
     return _run_cart_edit_interactive(client, cart_context, input_fn, print_fn)
 
@@ -319,7 +342,7 @@ later runs don't re-prompt until it expires.
 
 commands:
   cart            show your current real cart: items, payable total, bonus balance (read-only)
-  cart edit       manually replace one cart item with another
+  cart edit       manually replace one cart item with another, or add a new one
   cart promos     show real promo alternatives for every item in your cart (read-only)
   reorder         rebuild your cart from your typical (frequently-bought) items
   delivery        explicitly set your delivery address, delivery type, and timeslot
@@ -393,6 +416,14 @@ lookup that also carries back the companyId/branchId the cart write needs.
 
 an old slug not actually in your cart, or a new slug that resolves to
 nothing, errors clearly and leaves the cart untouched.
+
+adding a brand-new item, no swap:
+  silpo-agent cart edit --add <new-slug>
+adds <new-slug> as a new cart line, quantity 1, without removing anything.
+mutually exclusive with --replace. errors instead of touching the cart if
+<new-slug> is already a line in your cart -- rerunning --add would otherwise
+have to guess whether you wanted +1 or to leave it alone; use --replace or
+reorder for an item already in your cart.
 """
 
 _REORDER_EPILOG = """\
@@ -495,19 +526,28 @@ def main(
     cart_subparsers = cart_parser.add_subparsers(dest="cart_command")
     edit_parser = cart_subparsers.add_parser(
         "edit",
-        help="Replace one cart item with another",
+        help="Replace one cart item with another, or add a brand-new one",
         description="Replace one item in your real cart with another -- interactively (list current items, "
-        "free-text search a replacement, confirm) or non-interactively via --replace for scripting.",
+        "free-text search a replacement, confirm) or non-interactively via --replace for scripting. --add adds "
+        "a new item without removing anything.",
         epilog=_CART_EDIT_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    edit_parser.add_argument(
+    edit_group = edit_parser.add_mutually_exclusive_group()
+    edit_group.add_argument(
         "--replace",
         nargs=2,
         metavar=("OLD_SLUG", "NEW_SLUG"),
         default=None,
         help="Non-interactive: replace OLD_SLUG with NEW_SLUG, zero prompts. Both are product slugs as printed "
         "by `cart`, `deals`, `favorites-deals` and `cart promos`.",
+    )
+    edit_group.add_argument(
+        "--add",
+        metavar="NEW_SLUG",
+        default=None,
+        help="Non-interactive: add NEW_SLUG as a new cart line (quantity 1), zero prompts, nothing removed. "
+        "Errors instead of touching the cart if NEW_SLUG is already in it -- use --replace or reorder instead.",
     )
     cart_subparsers.add_parser(
         "promos",
@@ -584,7 +624,7 @@ def main(
     if args.command == "cart":
         if args.cart_command == "edit":
             return _run_cart_edit(
-                client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn, args.replace
+                client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn, args.replace, args.add
             )
         if args.cart_command == "promos":
             return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)

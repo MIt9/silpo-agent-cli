@@ -2,6 +2,7 @@ from silpo_agent.auth import MCPError
 from silpo_agent.cart_context import CartContext
 from silpo_agent.cart_editor import (
     CartEditError,
+    add_cart_item,
     resolve_product_by_slug,
     search_replacement_candidates,
     swap_cart_item,
@@ -296,6 +297,71 @@ def test_swap_cart_item_new_product_without_id_raises_and_makes_no_calls():
 
     try:
         swap_cart_item(client, context, "milk", {"price": 10.0})
+        assert False, "expected CartEditError"
+    except CartEditError:
+        pass
+
+    assert client.calls == []
+
+
+# --- add_cart_item -----------------------------------------------------
+
+
+def test_add_cart_item_adds_a_new_line_quantity_one():
+    context = cart_context(products=[{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}])
+    client = FakeClient()
+    new_product = {"id": "oat-milk", "slug": "oat-milk", "companyId": "c2", "branchId": "b2", "price": 55.0}
+
+    result = add_cart_item(client, context, new_product)
+
+    assert result.removed_slug is None
+    assert result.added_slug == "oat-milk"
+    assert result.added_price == 55.0
+    assert (
+        "silpo_add_or_update_cart_products",
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {"productId": "oat-milk", "companyId": "c2", "branchId": "b2", "quantity": 1, "addQuantity": True}
+            ],
+        },
+    ) in client.calls
+    assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)
+
+
+def test_add_cart_item_falls_back_to_cart_context_branch_and_company():
+    context = cart_context(branch_id="ctx-b", company_id="ctx-c")
+    client = FakeClient()
+    new_product = {"id": "oat-milk", "price": 55.0}
+
+    add_cart_item(client, context, new_product)
+
+    added_call = next(c for c in client.calls if c[0] == "silpo_add_or_update_cart_products")
+    assert added_call[1]["products"][0]["companyId"] == "ctx-c"
+    assert added_call[1]["products"][0]["branchId"] == "ctx-b"
+
+
+def test_add_cart_item_already_in_cart_raises_and_makes_no_calls():
+    context = cart_context(products=[{"productId": "oat-milk", "slug": "oat-milk", "companyId": "c1", "branchId": "b1", "quantity": 1}])
+    client = FakeClient()
+    new_product = {"id": "oat-milk", "slug": "oat-milk", "companyId": "c2", "branchId": "b2", "price": 55.0}
+
+    try:
+        add_cart_item(client, context, new_product)
+        assert False, "expected CartEditError"
+    except CartEditError as exc:
+        assert "oat-milk" in str(exc)
+        assert "already" in str(exc).lower()
+
+    assert client.calls == []
+
+
+def test_add_cart_item_without_id_raises_and_makes_no_calls():
+    context = cart_context()
+    client = FakeClient()
+
+    try:
+        add_cart_item(client, context, {"price": 10.0})
         assert False, "expected CartEditError"
     except CartEditError:
         pass

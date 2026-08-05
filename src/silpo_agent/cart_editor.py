@@ -62,7 +62,8 @@ class CartEditError(Exception):
 class CartEditResult:
     # Issue #50: reported in slugs, not UUIDs -- slug is what this CLI
     # publishes and what `--replace` takes, so it's what the user sees back.
-    removed_slug: str
+    # removed_slug is None for a pure add (--add): nothing was removed.
+    removed_slug: str | None
     added_slug: str | None
     added_price: float
 
@@ -208,6 +209,41 @@ def swap_cart_item(client, cart_context: CartContext, old_slug: str, new_product
 
     return CartEditResult(
         removed_slug=old_slug,
+        added_slug=new_product.get("slug"),
+        added_price=new_product.get("price", 0.0),
+    )
+
+
+def add_cart_item(client, cart_context: CartContext, new_product: dict) -> CartEditResult:
+    """Adds `new_product` (a full resolved product record, e.g. from
+    `resolve_product_by_slug`) as a brand-new cart line, quantity 1. No
+    removal involved, so unlike `swap_cart_item` there's no partial-mutation
+    rollback case to handle.
+
+    Raises `CartEditError` -- making zero MCP calls -- if the product has no
+    id, or if its productId already matches a line already in the cart:
+    reorder's `addQuantity=True` blindly re-adding an already-present item
+    silently doubled its quantity (see cart_writer.py's dedupe fix), and
+    --add must not repeat that mistake. Point the user at --replace or
+    reorder instead, rather than guessing whether they wanted +1."""
+    new_id = new_product.get("id") or new_product.get("productId")
+    if not new_id:
+        raise CartEditError("Product has no id; cannot add to cart.")
+
+    if any(p.get("productId") == new_id for p in cart_context.products):
+        label = new_product.get("slug") or new_id
+        raise CartEditError(
+            f"{label!r} is already in your cart; use `cart edit --replace` to swap it "
+            "or `reorder` to restock it, rather than adding a second line."
+        )
+
+    new_company_id = new_product.get("companyId") or cart_context.company_id
+    new_branch_id = new_product.get("branchId") or cart_context.branch_id
+
+    _add_call(client, cart_context, new_id, new_company_id, new_branch_id, 1)
+
+    return CartEditResult(
+        removed_slug=None,
         added_slug=new_product.get("slug"),
         added_price=new_product.get("price", 0.0),
     )
