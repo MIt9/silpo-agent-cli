@@ -168,7 +168,9 @@ just Address Resolver. Summarized first, details below:
   approximate). `cart.calculation.validations[]` reports real problems
   (out-of-stock items, stale timeslots) — worth surfacing to the user rather
   than only trusting a bare item list. `cart.calculation.totalAfterDiscounts`
-  is what the user actually pays; `total` is pre-discount.
+  is what the user actually pays; `total` is pre-discount. (Issue #27:
+  `CartContext.total_after_discounts` now carries this through -- no new
+  schema, `cart_context.py` previously just didn't read this field.)
 - **`silpo_add_or_update_cart_products`** (mutating, not called) — real
   request: `{"shoppingCartId": "...", "products": [{"productId": "...",
   "companyId": "...", "branchId": "...", "quantity": N, "addQuantity": bool,

@@ -846,6 +846,90 @@ def test_favorites_deals_command_with_no_discounts_prints_clean_message(capsys):
     assert "no discounted favorites" in out.lower()
 
 
+def test_cart_command_shows_items_payable_total_and_bonus(capsys):
+    client = FakeClient(
+        {
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": {
+                "success": True,
+                "cart": {
+                    "deliveryType": "DeliveryHome",
+                    "timeslot": {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"},
+                    "shipments": [
+                        {
+                            "companyId": "c1",
+                            "branchId": "b1",
+                            "products": [
+                                {"productId": "p1", "name": "Milk 1L", "quantity": 2, "price": 49.9, "stock": 12},
+                            ],
+                        }
+                    ],
+                    "calculation": {"validations": [], "totalAfterDiscounts": 99.8},
+                },
+                "loyalty": {"bonusAvailable": 24.27},
+            },
+        }
+    )
+
+    exit_code = main(["cart"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Milk 1L" in out
+    assert "Payable total: 99.80" in out
+    assert "Bonus available: 24.27" in out
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_cart_command_with_empty_cart_prints_sensible_message_not_crash(capsys):
+    client = FakeClient({"silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": None}})
+
+    exit_code = main(["cart"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "empty" in out.lower()
+    assert all(call[0] != "silpo_get_shopping_cart_by_id" for call in client.calls)
+
+
+def test_cart_command_shows_validations_non_blocking(capsys):
+    client = FakeClient(
+        {
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": {
+                "success": True,
+                "cart": {
+                    "deliveryType": "DeliveryHome",
+                    "timeslot": {"start": None, "end": None},
+                    "shipments": [
+                        {
+                            "companyId": "c1",
+                            "branchId": "b1",
+                            "products": [
+                                {"productId": "p1", "name": "Milk 1L", "quantity": 1, "price": 49.9, "stock": 0},
+                            ],
+                        }
+                    ],
+                    "calculation": {
+                        "validations": [
+                            {"level": "error", "type": "timeslot", "message": "timeslot.not_found", "context": []},
+                        ],
+                        "totalAfterDiscounts": 49.9,
+                    },
+                },
+                "loyalty": {},
+            },
+        }
+    )
+
+    exit_code = main(["cart"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "timeslot.not_found" in out
+    assert "Milk 1L" in out
+
+
 def _delivery_fixture_responses():
     """Full fixture set for a happy-path `delivery` run: saved address,
     cart context (address/shipments template), delivery-type options

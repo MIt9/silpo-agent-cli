@@ -21,6 +21,7 @@ import sys
 from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient
 from silpo_agent.cart_context import resolve_cart_context
+from silpo_agent.cart_viewer import format_cart
 from silpo_agent.cart_writer import write_cart
 from silpo_agent.coupons_lister import list_coupons
 from silpo_agent.delivery_settings import run_delivery_settings
@@ -101,6 +102,13 @@ def _run_clear_context(log_store, input_fn, print_fn) -> int:
     return 0
 
 
+def _run_cart(client, log_store, input_fn, print_fn) -> int:
+    cart_context = resolve_cart_context(client, input_fn=input_fn, log_store=log_store, print_fn=print_fn)
+    for line in format_cart(cart_context):
+        print_fn(line)
+    return 0
+
+
 def _run_coupons(client) -> int:
     lines = list_coupons(client)
     if not lines:
@@ -127,6 +135,7 @@ mcp.silpo.ua); the token is cached in your OS keyring afterward, so
 later runs don't re-prompt until it expires.
 
 commands:
+  cart            show your current real cart: items, payable total, bonus balance (read-only)
   reorder         rebuild your cart from your typical (frequently-bought) items
   delivery        explicitly set your delivery address, delivery type, and timeslot
   clear-context   wipe your local reorder history and substitution memory
@@ -280,6 +289,14 @@ def main(
         "Read-only -- no matching/heuristic, since it's already your own explicit list.",
     )
 
+    subparsers.add_parser(
+        "cart",
+        help="Show your current real cart: items, payable total, bonus balance (read-only)",
+        description="Show the current real Silpo cart: items (name/quantity/price/stock), the amount actually "
+        "payable (totalAfterDiscounts, never the pre-discount total), any cart validations (stock/timeslot "
+        "problems), and your loyalty bonus balance. Read-only -- makes no changes to your cart.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -307,6 +324,9 @@ def main(
 
     if args.command == "favorites-deals":
         return _run_favorites_deals(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+
+    if args.command == "cart":
+        return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     return 0
 

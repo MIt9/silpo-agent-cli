@@ -62,7 +62,7 @@ def cart_response(cart, loyalty=None):
 
 def full_cart(branch_id="b1", company_id="c1", delivery_type="DeliveryHome",
               timeslot_start="2026-08-04T10:00:00", timeslot_end="2026-08-04T12:00:00",
-              validations=None, products=None):
+              validations=None, products=None, total_after_discounts=166.7):
     return {
         "id": "cart-1",
         "deliveryType": delivery_type,
@@ -70,7 +70,7 @@ def full_cart(branch_id="b1", company_id="c1", delivery_type="DeliveryHome",
         "shipments": [
             {"id": "ship-1", "companyId": company_id, "branchId": branch_id, "products": products or []}
         ],
-        "calculation": {"validations": validations or []},
+        "calculation": {"validations": validations or [], "totalAfterDiscounts": total_after_discounts},
     }
 
 
@@ -99,6 +99,9 @@ def test_resolves_full_cart_context():
     assert context.timeslot == {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"}
     assert context.address is None
     assert context.shipments == full_cart()["shipments"]
+    # Payable total (issue #27): cart.calculation.totalAfterDiscounts, never
+    # the pre-discount "total" -- CartContext previously had no total field.
+    assert context.total_after_discounts == 166.7
 
 
 def test_resolves_non_empty_cart_products_for_cart_writer_guard():

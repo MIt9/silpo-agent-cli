@@ -47,6 +47,12 @@ instead of prompting the user a second time. Callers with no address of
 their own (future `cart`/`deals`/etc. commands) can omit it -- the fallback
 then runs `resolve_address`'s own interactive confirm/pick/new-address flow,
 using `log_store`/`input_fn`/`print_fn` passed through for that purpose.
+
+Issue #27 -- `CartContext.total_after_discounts` mirrors
+`cart.calculation.totalAfterDiscounts`, the amount the user actually pays
+(per docs/mcp_schema.md's "Cart tools" section: `total` is pre-discount).
+CartContext previously exposed no total at all; the Cart Viewer (issue #27)
+needs this for its payable-total line.
 """
 
 from dataclasses import dataclass, field
@@ -75,6 +81,9 @@ class CartContext:
     timeslot: dict | None = None
     address: dict | None = None
     shipments: list[dict] = field(default_factory=list)
+    # Payable total (issue #27): cart.calculation.totalAfterDiscounts, the
+    # amount actually charged -- never the pre-discount "total".
+    total_after_discounts: float | None = None
 
 
 def _empty_context(shopping_cart_id: str | None = None) -> CartContext:
@@ -128,7 +137,8 @@ def resolve_cart_context(
     shipments = cart.get("shipments") or []
     shipment = shipments[0] if shipments else {}
     timeslot = cart.get("timeslot") or {}
-    validations = (cart.get("calculation") or {}).get("validations") or []
+    calculation = cart.get("calculation") or {}
+    validations = calculation.get("validations") or []
 
     for validation in validations:
         print_fn(f"Cart validation [{validation.get('level')}]: {validation.get('message')}")
@@ -162,4 +172,5 @@ def resolve_cart_context(
         timeslot=cart.get("timeslot"),
         address=cart.get("address"),
         shipments=shipments,
+        total_after_discounts=calculation.get("totalAfterDiscounts"),
     )
