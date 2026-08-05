@@ -3,6 +3,7 @@ from silpo_agent.cart_context import CartContext
 from silpo_agent.cart_editor import (
     CartEditError,
     add_cart_item,
+    remove_cart_item,
     resolve_product_by_slug,
     search_replacement_candidates,
     swap_cart_item,
@@ -376,6 +377,39 @@ def test_add_cart_item_without_id_raises_and_makes_no_calls():
         assert False, "expected CartEditError"
     except CartEditError:
         pass
+
+    assert client.calls == []
+
+
+# --- remove_cart_item ---------------------------------------------------
+
+
+def test_remove_cart_item_removes_the_line():
+    context = cart_context(
+        products=[{"productId": "milk-uuid", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "price": 45.0}]
+    )
+    client = FakeClient()
+
+    result = remove_cart_item(client, context, "milk")
+
+    assert result.removed_slug == "milk"
+    assert result.added_slug is None
+    assert (
+        "silpo_remove_cart_products",
+        {"shoppingCartId": "cart-1", "products": [{"productId": "milk-uuid"}]},
+    ) in client.calls
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_remove_cart_item_unknown_slug_raises_before_any_call():
+    context = cart_context(products=[{"productId": "p1", "slug": "bread", "companyId": "c1", "quantity": 1}])
+    client = FakeClient()
+
+    try:
+        remove_cart_item(client, context, "no-such-slug")
+        assert False, "expected CartEditError"
+    except CartEditError as exc:
+        assert "no-such-slug" in str(exc)
 
     assert client.calls == []
 

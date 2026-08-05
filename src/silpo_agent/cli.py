@@ -25,6 +25,7 @@ from silpo_agent.cart_context import resolve_cart_context
 from silpo_agent.cart_editor import (
     add_cart_item,
     CartEditError,
+    remove_cart_item,
     resolve_product_by_slug,
     search_replacement_candidates,
     swap_cart_item,
@@ -140,6 +141,19 @@ def _run_cart_edit_add(client, cart_context, new_slug, print_fn, quantity: int =
     return 0
 
 
+def _run_cart_edit_remove(client, cart_context, slug, print_fn) -> int:
+    """Non-interactive delete: removes SLUG's cart line, zero prompts,
+    nothing added back. Errors (no MCP mutation made) if the slug isn't
+    actually in the cart -- see remove_cart_item."""
+    try:
+        result = remove_cart_item(client, cart_context, slug)
+    except CartEditError as exc:
+        print_fn(f"cart edit: {exc}")
+        return 1
+    print_fn(f"Removed {result.removed_slug} ({result.removed_price:.2f})")
+    return 0
+
+
 def _pick_free_text_replacement(client, cart_context, input_fn, print_fn) -> dict | None:
     """Free-text search path (issue #30): prompts for search terms, shows
     matching candidates, lets the user pick one. Returns the chosen product
@@ -236,7 +250,14 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
 
 
 def _run_cart_edit(
-    client, log_store, input_fn, print_fn, replace: list[str] | None, add: str | None = None, quantity: int = 1
+    client,
+    log_store,
+    input_fn,
+    print_fn,
+    replace: list[str] | None,
+    add: str | None = None,
+    quantity: int = 1,
+    remove: str | None = None,
 ) -> int:
     cart_context = resolve_cart_context(client, input_fn=input_fn, print_fn=print_fn, log_store=log_store)
     if not cart_context.shopping_cart_id:
@@ -249,6 +270,9 @@ def _run_cart_edit(
 
     if add is not None:
         return _run_cart_edit_add(client, cart_context, add, print_fn, quantity=quantity)
+
+    if remove is not None:
+        return _run_cart_edit_remove(client, cart_context, remove, print_fn)
 
     return _run_cart_edit_interactive(client, cart_context, input_fn, print_fn)
 
@@ -433,6 +457,12 @@ valid together with --add. errors instead of touching the cart if
 <new-slug> is already a line in your cart -- rerunning --add would otherwise
 have to guess whether you wanted +N or to leave it alone; use --replace or
 reorder for an item already in your cart.
+
+removing an item, no replacement:
+  silpo-agent cart edit --remove <slug>
+removes <slug>'s cart line, zero prompts, nothing added back. mutually
+exclusive with --replace and --add. errors instead of touching the cart if
+<slug> isn't actually a line in your cart.
 """
 
 _REORDER_EPILOG = """\
@@ -535,10 +565,10 @@ def main(
     cart_subparsers = cart_parser.add_subparsers(dest="cart_command")
     edit_parser = cart_subparsers.add_parser(
         "edit",
-        help="Replace one cart item with another, or add a brand-new one",
+        help="Replace one cart item with another, add a brand-new one, or remove one outright",
         description="Replace one item in your real cart with another -- interactively (list current items, "
         "free-text search a replacement, confirm) or non-interactively via --replace for scripting. --add adds "
-        "a new item without removing anything.",
+        "a new item without removing anything. --remove deletes a line without adding a replacement.",
         epilog=_CART_EDIT_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -558,6 +588,13 @@ def main(
         help="Non-interactive: add NEW_SLUG as a new cart line (quantity 1, or --quantity), zero prompts, "
         "nothing removed. Errors instead of touching the cart if NEW_SLUG is already in it -- use --replace or "
         "reorder instead.",
+    )
+    edit_group.add_argument(
+        "--remove",
+        metavar="SLUG",
+        default=None,
+        help="Non-interactive: remove SLUG's cart line, zero prompts, nothing added back. Errors instead of "
+        "touching the cart if SLUG isn't actually in it.",
     )
     edit_parser.add_argument(
         "--quantity",
@@ -659,6 +696,7 @@ def main(
                 args.replace,
                 args.add,
                 args.quantity,
+                args.remove,
             )
         if args.cart_command == "promos":
             return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
