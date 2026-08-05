@@ -126,13 +126,23 @@ def _fetch_all_categories(client, cart_context: CartContext) -> list[dict]:
     return categories
 
 
-def resolve_category_slug(client, cart_context: CartContext, query: str) -> str | None:
-    """Free-text category name (e.g. "Овочі") -> real category slug.
-    `silpo_get_products`'s own `category` filter takes a slug, not a name --
-    a free-text name there silently matches nothing (live-verified). Exact
-    (case-insensitive) title match wins; otherwise the shortest title
-    containing the query, on the theory that a shorter title is the more
-    specific category (e.g. "Овочі" over "Фрукти, овочі")."""
+@dataclass(frozen=True)
+class CategoryMatch:
+    slug: str
+    title: str
+    exact: bool
+
+
+def resolve_category(client, cart_context: CartContext, query: str) -> CategoryMatch | None:
+    """Free-text category name (e.g. "Овочі") -> matched real category, plus
+    whether the match was exact. `silpo_get_products`'s own `category` filter
+    takes a slug, not a name -- a free-text name there silently matches
+    nothing (live-verified). Exact (case-insensitive) title match wins;
+    otherwise the shortest title containing the query, on the theory that a
+    shorter title is the more specific category (e.g. "Овочі" over "Фрукти,
+    овочі"). Issue #05: `exact=False` signals the CLI should warn the user
+    which real category it fell back to, since a query like "Вино" can
+    otherwise silently match "Виноград" instead."""
     query_lower = query.strip().lower()
     if not query_lower:
         return None
@@ -140,13 +150,31 @@ def resolve_category_slug(client, cart_context: CartContext, query: str) -> str 
     categories = _fetch_all_categories(client, cart_context)
     exact = [c for c in categories if (c.get("title") or "").strip().lower() == query_lower]
     if exact:
-        return exact[0].get("slug")
+        return CategoryMatch(slug=exact[0].get("slug"), title=exact[0].get("title"), exact=True)
 
     partial = [c for c in categories if query_lower in (c.get("title") or "").lower()]
     if not partial:
         return None
     partial.sort(key=lambda c: len(c.get("title") or ""))
-    return partial[0].get("slug")
+    best = partial[0]
+    return CategoryMatch(slug=best.get("slug"), title=best.get("title"), exact=False)
+
+
+def list_category_titles(client, cart_context: CartContext) -> list[str]:
+    """Every real category title currently available, alphabetically --
+    powers `deals --list-categories` (issue #05) so a user can see what to
+    type for `--category` instead of guessing. Read-only: reuses the same
+    `_fetch_all_categories` listing `resolve_category` matches against,
+    fetches no deals."""
+    categories = _fetch_all_categories(client, cart_context)
+    return sorted(title for c in categories if (title := c.get("title")))
+
+
+def resolve_category_slug(client, cart_context: CartContext, query: str) -> str | None:
+    """Thin wrapper over `resolve_category` for callers that only need the
+    slug (e.g. `scan_deals`'s category filter)."""
+    match = resolve_category(client, cart_context, query)
+    return match.slug if match else None
 
 
 def scan_deals(

@@ -1,5 +1,11 @@
 from silpo_agent.cart_context import CartContext
-from silpo_agent.promo_scanner import CategoryNotFoundError, resolve_category_slug, scan_deals
+from silpo_agent.promo_scanner import (
+    CategoryNotFoundError,
+    list_category_titles,
+    resolve_category,
+    resolve_category_slug,
+    scan_deals,
+)
 
 
 class FakeClient:
@@ -246,6 +252,31 @@ def test_resolve_category_slug_falls_back_to_shortest_substring_match():
     assert resolve_category_slug(client, _context(), "овоч") == "frukty-ovochi-4788"
 
 
+def test_resolve_category_reports_exact_match():
+    """Issue #05: the CLI needs to know a match was exact (no disambiguation
+    warning needed) vs. a substring fallback (warning needed)."""
+    client = FakeClient({"silpo_get_categories": _categories_page(("ovochi-4808", "Овочі"))})
+
+    match = resolve_category(client, _context(), "Овочі")
+
+    assert match.slug == "ovochi-4808"
+    assert match.title == "Овочі"
+    assert match.exact is True
+
+
+def test_resolve_category_reports_fallback_match_with_the_real_title():
+    """Issue #05: "Вино" (wine) must not silently resolve to "Виноград"
+    (grapes) -- the caller needs both the substring-matched title and
+    exact=False to warn the user."""
+    client = FakeClient({"silpo_get_categories": _categories_page(("vynograd-123", "Виноград"))})
+
+    match = resolve_category(client, _context(), "Вино")
+
+    assert match.slug == "vynograd-123"
+    assert match.title == "Виноград"
+    assert match.exact is False
+
+
 def test_resolve_category_slug_no_match_returns_none():
     client = FakeClient({"silpo_get_categories": _categories_page(("frukty-4791", "Фрукти"))})
 
@@ -269,6 +300,21 @@ def test_resolve_category_slug_paginates_across_the_full_category_list():
     client.call = call
 
     assert resolve_category_slug(client, _context(), "Овочі") == "ovochi-4808"
+
+
+def test_list_category_titles_returns_every_real_title_sorted():
+    """Issue #05: `deals --list-categories` -- read-only, reuses the same
+    `silpo_get_categories` listing `resolve_category` matches against,
+    instead of guessing category names."""
+    client = FakeClient(
+        {"silpo_get_categories": _categories_page(("frukty-4791", "Фрукти"), ("ovochi-4808", "Овочі"))}
+    )
+
+    titles = list_category_titles(client, _context())
+
+    assert titles == sorted(["Фрукти", "Овочі"])
+    assert all(call[0] != "silpo_get_promotions" for call in client.calls)
+    assert all(call[0] != "silpo_get_products" for call in client.calls)
 
 
 def test_scan_deals_with_category_queries_get_products_directly_by_slug():

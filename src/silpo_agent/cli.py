@@ -38,7 +38,7 @@ from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
 from silpo_agent.promo_finder import find_promo_alternatives
 from silpo_agent.promo_optimizer import optimize_promos
-from silpo_agent.promo_scanner import CategoryNotFoundError, scan_deals
+from silpo_agent.promo_scanner import CategoryNotFoundError, list_category_titles, resolve_category, scan_deals
 from silpo_agent.substitution_resolver import resolve_substitutions
 
 
@@ -274,6 +274,13 @@ def _run_cart(client, log_store, input_fn, print_fn) -> int:
 
 def _run_deals(client, limit, log_store, input_fn, print_fn, category=None) -> int:
     cart_context = resolve_cart_context(client, log_store=log_store, input_fn=input_fn, print_fn=print_fn)
+    if category is not None:
+        # Issue #05: warn when --category only matched via the substring
+        # fallback (e.g. "Вино" -> "Виноград") -- silent otherwise means the
+        # user only notices something's off once the results look wrong.
+        match = resolve_category(client, cart_context, category)
+        if match is not None and not match.exact:
+            print_fn(f'matched category "{match.title}" for query "{category}"')
     try:
         deals = scan_deals(client, cart_context, limit=limit, category=category)
     except CategoryNotFoundError as exc:
@@ -289,6 +296,13 @@ def _run_deals(client, limit, log_store, input_fn, print_fn, category=None) -> i
         if deal.slug:
             line += f"  {deal.slug}"
         print_fn(line)
+    return 0
+
+
+def _run_deals_list_categories(client, log_store, input_fn, print_fn) -> int:
+    cart_context = resolve_cart_context(client, log_store=log_store, input_fn=input_fn, print_fn=print_fn)
+    for title in list_category_titles(client, cart_context):
+        print_fn(title)
     return 0
 
 
@@ -629,6 +643,12 @@ def main(
         "(exact match preferred, else the shortest title containing it) -- errors clearly if nothing matches, "
         "rather than silently showing zero deals.",
     )
+    deals_parser.add_argument(
+        "--list-categories",
+        action="store_true",
+        help="List every real category title currently available, instead of showing deals -- read-only, "
+        "fetches no deals. Use this to see what to pass to --category.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -680,6 +700,10 @@ def main(
         return _run_favorites_deals(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     if args.command == "deals":
+        if args.list_categories:
+            return _run_deals_list_categories(
+                client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn
+            )
         return _run_deals(
             client or MCPClient(), args.limit, log_store or ReorderLogStore(), input_fn, print_fn, args.category
         )
