@@ -54,7 +54,7 @@ def test_cart_edit_interactive_happy_path_swaps_item(capsys, tmp_path):
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
-    answers = iter(["1", "oat milk", "1", "y"])
+    answers = iter(["1", "1", "oat milk", "1", "y"])
 
     exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": next(answers))
 
@@ -94,7 +94,7 @@ def test_cart_edit_interactive_decline_confirmation_leaves_cart_untouched(capsys
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
-    answers = iter(["1", "oat milk", "1", "n"])
+    answers = iter(["1", "1", "oat milk", "1", "n"])
 
     exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": next(answers))
 
@@ -192,7 +192,7 @@ def test_cart_edit_interactive_no_search_results_errors_without_mutating(capsys,
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
-    answers = iter(["1", "nonexistent"])
+    answers = iter(["1", "1", "nonexistent"])
 
     exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": next(answers))
 
@@ -218,7 +218,7 @@ def test_cart_edit_interactive_filters_plastic_bags_from_candidates(capsys, tmp_
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
-    answers = iter(["1", "пакет", "1", "y"])
+    answers = iter(["1", "1", "пакет", "1", "y"])
 
     exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": next(answers))
 
@@ -228,6 +228,151 @@ def test_cart_edit_interactive_filters_plastic_bags_from_candidates(capsys, tmp_
     # not the filtered-out bag.
     assert "bag1" not in out
     assert "Replaced milk with oat-milk" in out
+
+
+def test_cart_edit_interactive_promo_browse_path_swaps_item(capsys, tmp_path):
+    """Issue #31: choosing the promo-browse path reuses promo_finder's
+    find_promo_alternatives for the specific item being replaced, and the
+    resulting swap goes through the exact same remove+add call sequence as
+    the free-text path (test_cart_edit_interactive_happy_path_swaps_item)."""
+    products = [
+        {
+            "productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1,
+            "name": "Молоко", "slug": "milk-slug",
+        }
+    ]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_similar_products": {
+                "success": True,
+                "products": [
+                    {
+                        "id": "milk-promo", "name": "Milk Promo", "slug": "milk-promo-slug",
+                        "price": 38.0, "oldPrice": 50.0, "companyId": "c1", "branchId": "b1",
+                    },
+                ],
+            },
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    answers = iter(["1", "2", "1", "y"])
+
+    exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": next(answers))
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Replaced milk with milk-promo" in out
+    assert (
+        "silpo_get_similar_products",
+        {"branchId": "b1", "slug": "milk-slug", "deliveryType": "DeliveryHome", "limit": 10},
+    ) in client.calls
+    assert (
+        "silpo_remove_cart_products",
+        {"shoppingCartId": "cart-1", "products": [{"productId": "milk"}]},
+    ) in client.calls
+    assert (
+        "silpo_add_or_update_cart_products",
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "milk-promo",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+            ],
+        },
+    ) in client.calls
+
+
+def test_cart_edit_interactive_promo_browse_no_candidates_falls_back_to_free_text(capsys, tmp_path):
+    """Issue #31 acceptance criteria: an item with no discounted similar
+    products falls back gracefully to the free-text search path instead of
+    erroring."""
+    products = [
+        {
+            "productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1,
+            "name": "Молоко", "slug": "milk-slug",
+        }
+    ]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_similar_products": {"success": True, "products": []},
+            "silpo_find_products_batch": _batch(
+                "oat milk", [{"id": "oat-milk", "name": "Oat Milk", "price": 55.0, "companyId": "c1", "branchId": "b1"}]
+            ),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    answers = iter(["1", "2", "oat milk", "1", "y"])
+
+    exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": next(answers))
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no discounted alternatives" in out.lower()
+    assert "falling back" in out.lower()
+    assert "Replaced milk with oat-milk" in out
+    assert (
+        "silpo_remove_cart_products",
+        {"shoppingCartId": "cart-1", "products": [{"productId": "milk"}]},
+    ) in client.calls
+    assert (
+        "silpo_add_or_update_cart_products",
+        {
+            "shoppingCartId": "cart-1",
+            "products": [
+                {
+                    "productId": "oat-milk",
+                    "companyId": "c1",
+                    "branchId": "b1",
+                    "quantity": 1,
+                    "addQuantity": True,
+                    "comment": None,
+                }
+            ],
+        },
+    ) in client.calls
+
+
+def test_cart_edit_interactive_promo_browse_invalid_pick_errors_without_mutating(capsys, tmp_path):
+    """An out-of-range pick on the promo-alternatives list is a hard error
+    (like the free-text path's invalid pick) -- distinct from the
+    no-candidates-found case, which falls back instead of erroring."""
+    products = [
+        {
+            "productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1,
+            "name": "Молоко", "slug": "milk-slug",
+        }
+    ]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_similar_products": {
+                "success": True,
+                "products": [
+                    {
+                        "id": "milk-promo", "name": "Milk Promo", "slug": "milk-promo-slug",
+                        "price": 38.0, "oldPrice": 50.0,
+                    },
+                ],
+            },
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    answers = iter(["1", "2", "99"])
+
+    exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": next(answers))
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
 
 
 def test_cart_edit_empty_cart_reports_and_exits_zero(capsys, tmp_path):

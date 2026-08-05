@@ -1024,3 +1024,18 @@ design decision was made, not schema-related:
   preserve. `addQuantity: True` is kept for consistency with Cart Writer's
   established payload shape, though since the new line never already
   exists in the cart at add time, `True`/`False` are equivalent here.
+
+## Design decision made in issue #31 (Cart Editor promo-browse path)
+
+No new schema assumptions -- the promo-browse path calls `promo_finder.py`'s
+`find_promo_alternatives` exactly as issue #28 built it (same
+`silpo_get_similar_products` request/response shape documented above), and
+feeds its result into `cart_editor.py`'s `swap_cart_item` exactly as the
+free-text path does, after converting the returned `PromoCandidate` into the
+same plain product-record shape (`id`/`name`/`price`/`companyId`/`branchId`)
+`swap_cart_item` already expects. `cli.py`'s `_run_cart_edit_interactive`
+now asks the user to pick free-text search or promo-browse right after
+picking which cart item to replace; an item with no discounted alternatives
+(empty list, or no `slug` on the cart line at all) prints a message and
+falls straight through to the free-text path instead of erroring or
+re-prompting for a mode.
