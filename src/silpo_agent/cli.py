@@ -24,6 +24,7 @@ from silpo_agent.cart_context import resolve_cart_context
 from silpo_agent.cart_writer import write_cart
 from silpo_agent.coupons_lister import list_coupons
 from silpo_agent.delivery_settings import run_delivery_settings
+from silpo_agent.favorites_deals import list_favorites_deals
 from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
 from silpo_agent.promo_optimizer import optimize_promos
@@ -110,6 +111,16 @@ def _run_coupons(client) -> int:
     return 0
 
 
+def _run_favorites_deals(client, log_store, input_fn, print_fn) -> int:
+    deals = list_favorites_deals(client, log_store, input_fn=input_fn, print_fn=print_fn)
+    if not deals:
+        print_fn("No discounted favorites found.")
+        return 0
+    for deal in deals:
+        print_fn(deal.format())
+    return 0
+
+
 _TOP_LEVEL_EPILOG = """\
 First run triggers a one-time browser login (OAuth2.1+PKCE against
 mcp.silpo.ua); the token is cached in your OS keyring afterward, so
@@ -120,6 +131,7 @@ commands:
   delivery        explicitly set your delivery address, delivery type, and timeslot
   clear-context   wipe your local reorder history and substitution memory
   coupons         list your active loyalty coupons (read-only)
+  favorites-deals list your favorited products currently on discount (read-only)
 
 run 'silpo-agent reorder --help' for reorder's flags and examples.
 """
@@ -261,6 +273,13 @@ def main(
         "your cart or search results.",
     )
 
+    subparsers.add_parser(
+        "favorites-deals",
+        help="List your favorited products currently on discount (read-only)",
+        description="Check your own favorites list for items currently discounted (oldPrice > price). "
+        "Read-only -- no matching/heuristic, since it's already your own explicit list.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -285,6 +304,9 @@ def main(
 
     if args.command == "coupons":
         return _run_coupons(client or MCPClient())
+
+    if args.command == "favorites-deals":
+        return _run_favorites_deals(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     return 0
 

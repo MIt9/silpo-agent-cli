@@ -960,3 +960,20 @@ sweeps, made while building the `delivery` command
   future live run finds one without it, that entry is silently skipped by
   this logic rather than crashing (defensive `isinstance`/`.get()` checks
   throughout `_newly_unavailable`).
+
+## Assumptions made in issue #33 (Favorites Deals / `favorites-deals` command)
+
+`silpo_get_my_favorites` is still not live-verified (see "Profile / account
+tools" above -- only its request param names, `{"branchId", "deliveryType",
+"timeslotStart", "limit", "offset"}`, are documented from the tool
+description, never called live). `favorites_deals.py` assumes its response
+wraps the favorited product list under a top-level `"products"` key --
+inferred from the tool description's "returns products in the same shape as
+`silpo_get_products`" plus the confirmed live shape of the closest sibling
+call, `silpo_get_similar_products` (`{"success", "summary", "products": [...],
+"meta": {"total"}}`) -- not confirmed against a real response. If the real
+key differs (e.g. `"favorites"`), only `list_favorites_deals`'s one `.get("products")`
+line needs revisiting. Branch/delivery/timeslot context comes from
+`cart_context.resolve_cart_context` called with no pre-resolved address, per
+issue #29's "self-resolving path for future callers" note -- this is the
+first command to exercise that path live.
