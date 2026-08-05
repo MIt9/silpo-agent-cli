@@ -318,8 +318,13 @@ what it does, in order:
   1. confirms your delivery address (same address confirmation as reorder --
      proposes the first saved address, or pick a different one/type a new one)
   2. lists delivery types available at that address and asks you to pick one
-     -- only DeliveryHome (regular home delivery) is supported end to end
-     right now; picking anything else stops here without changing anything
+     -- DeliveryHome (regular home delivery), SelfPickup, and NovaPoshta are
+     supported end to end; picking anything else stops here without
+     changing anything
+       - SelfPickup: lists the nearest pickup branches to your address and
+         asks you to pick one
+       - NovaPoshta: asks for a city/settlement to search, then an office or
+         parcel locker in it
   3. lists real available timeslots at that delivery type's branch and asks
      you to pick one
   4. applies the address, delivery type, and timeslot together in a single
@@ -487,7 +492,7 @@ def main(
         "delivery",
         help="Explicitly set delivery address, delivery type, and timeslot",
         description="Explicitly set your delivery address, delivery type, and timeslot together, in one real "
-        "update to your Silpo cart. DeliveryHome only for now; other delivery types are a follow-up.",
+        "update to your Silpo cart. Supports DeliveryHome, SelfPickup, and NovaPoshta.",
         epilog=_DELIVERY_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
