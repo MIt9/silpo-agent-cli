@@ -55,6 +55,38 @@ def test_filters_to_discounted_favorites_only():
     assert call_args == {"branchId": "b1", "deliveryType": "DeliveryHome", "timeslotStart": "2026-08-05T10:00:00"}
 
 
+def test_discounted_favorite_carries_and_prints_its_slug():
+    """Issue #50: a discounted favorite is only actionable if it can be
+    handed to `cart edit --replace`, which takes slugs."""
+    client = FakeClient(
+        _responses(
+            [
+                {
+                    "id": "p1",
+                    "slug": "maslo-ferma-solodkovershkove-82-5-576830",
+                    "name": "Butter",
+                    "price": 49.9,
+                    "oldPrice": 69.9,
+                }
+            ]
+        )
+    )
+
+    deals = list_favorites_deals(client)
+
+    assert deals[0].slug == "maslo-ferma-solodkovershkove-82-5-576830"
+    assert "maslo-ferma-solodkovershkove-82-5-576830" in deals[0].format()
+
+
+def test_favorite_without_a_slug_formats_without_a_dangling_identifier():
+    client = FakeClient(_responses([{"id": "p1", "name": "Butter", "price": 49.9, "oldPrice": 69.9}]))
+
+    deals = list_favorites_deals(client)
+
+    assert deals[0].slug is None
+    assert "None" not in deals[0].format()
+
+
 def test_no_discounted_favorites_returns_empty_without_error():
     client = FakeClient(
         _responses(

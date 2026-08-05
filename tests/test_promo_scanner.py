@@ -53,6 +53,24 @@ def _product(product_id, price, old_price=None, name="Product"):
     }
 
 
+def test_deals_carry_the_slug_so_they_can_be_fed_to_cart_edit(capsys):
+    """Issue #50: a deal is only actionable if you can hand it to
+    `cart edit --replace`, which takes slugs -- so the scanner must carry
+    the product record's own slug through, never derive one."""
+    product = _product("p1", 80.0, old_price=100.0)
+    product["slug"] = "moloko-ferma-ultrapasteryzovane-2-5-576829"
+    client = FakeClient(
+        {
+            "silpo_get_promotions": _promotions(("dairy", "Dairy deals", 1)),
+            "silpo_get_products": {"success": True, "products": [product]},
+        }
+    )
+
+    deals = scan_deals(client, _context())
+
+    assert deals[0].slug == "moloko-ferma-ultrapasteryzovane-2-5-576829"
+
+
 def test_discount_percentage_computed_from_price_and_old_price():
     """A single promo category, single product: 100 -> 80 is a 20% discount."""
     client = FakeClient(

@@ -78,6 +78,15 @@ covers day-to-day usage of the finished `reorder` command.
   already with `silpo_get_my_online_orders` in `cli.py`).
 - **`silpo_get_my_shopping_cart` returns only a cart id**, not contents —
   always follow with `silpo_get_shopping_cart_by_id` (see `cart_context.py`).
+- **Slug is this CLI's public product identifier, not the product UUID**
+  (issue #50). Every read-only command prints it and `cart edit --replace`
+  takes it. A slug must be copied from a real response — `silpo_get_products`,
+  `silpo_find_products_batch`, or a cart line — and can never be constructed
+  from a product name; the server's own tool description says so explicitly.
+  `silpo_get_product_details({branchId, slug, deliveryType, timeslotStart,
+  timeslotEnd})` is the per-slug lookup, and it returns `companyId`/`branchId`
+  on the record, so callers don't need `CartContext.company_id` (which is
+  `None` on the #29 no-shipments path).
 - Live testing this project's own auth flow requires a real Silpo account
   and a browser; if you hit an unexplained Cloudflare block or empty-looking
   response after touching `auth.py` or any live schema assumption, check

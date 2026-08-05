@@ -21,7 +21,12 @@ import sys
 from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient
 from silpo_agent.cart_context import resolve_cart_context
-from silpo_agent.cart_editor import CartEditError, search_replacement_candidates, swap_cart_item
+from silpo_agent.cart_editor import (
+    CartEditError,
+    resolve_product_by_slug,
+    search_replacement_candidates,
+    swap_cart_item,
+)
 from silpo_agent.cart_viewer import format_cart
 from silpo_agent.cart_writer import write_cart
 from silpo_agent.coupons_lister import list_coupons
@@ -93,29 +98,21 @@ def _run_delivery(client, log_store, input_fn, print_fn) -> int:
     return 0 if result.applied else 1
 
 
-def _resolve_new_product(client, cart_context, new_product_id, print_fn):
-    """Resolves `new_product_id` to a full product record via the same
-    free-text search `search_replacement_candidates` uses for the
-    interactive flow -- there's no per-id product lookup tool, so the id
-    itself is used as the search query and matched by exact id in the
-    results (see cart_editor.py's module docstring)."""
-    candidates = search_replacement_candidates(client, cart_context, new_product_id)
-    match = next((c for c in candidates if (c.get("id") or c.get("productId")) == new_product_id), None)
-    if match is None:
-        print_fn(f"cart edit: replacement product {new_product_id!r} not found")
-    return match
-
-
-def _run_cart_edit_replace(client, cart_context, old_id, new_id, print_fn) -> int:
-    new_product = _resolve_new_product(client, cart_context, new_id, print_fn)
+def _run_cart_edit_replace(client, cart_context, old_slug, new_slug, print_fn) -> int:
+    """Non-interactive swap (issue #50): both arguments are slugs. The new
+    one resolves through `cart_editor.resolve_product_by_slug`, a real
+    per-slug lookup -- the old path used the id as a free-text search query,
+    which issue #18 documents as usually returning nothing."""
+    new_product = resolve_product_by_slug(client, cart_context, new_slug)
     if new_product is None:
+        print_fn(f"cart edit: replacement product {new_slug!r} not found")
         return 1
     try:
-        result = swap_cart_item(client, cart_context, old_id, new_product)
+        result = swap_cart_item(client, cart_context, old_slug, new_product)
     except CartEditError as exc:
         print_fn(f"cart edit: {exc}")
         return 1
-    print_fn(f"Replaced {result.removed_product_id} with {result.added_product_id} ({result.added_price:.2f})")
+    print_fn(f"Replaced {result.removed_slug} with {result.added_slug} ({result.added_price:.2f})")
     return 0
 
 
@@ -158,6 +155,7 @@ def _pick_promo_replacement(candidates, input_fn, print_fn) -> dict | None:
     chosen = candidates[pick_idx - 1]
     return {
         "id": chosen.product_id,
+        "slug": chosen.slug,
         "name": chosen.name,
         "price": chosen.price,
         "companyId": chosen.company_id,
@@ -179,12 +177,11 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
         print_fn(f"No item numbered {choice!r}.")
         return 1
     old_product = cart_context.products[idx - 1]
-    old_id = old_product.get("productId")
+    old_slug = old_product.get("slug")
 
     mode = input_fn("Replace via [1] free-text search or [2] promo alternatives? [1/2] ").strip()
     if mode == "2":
-        slug = old_product.get("slug")
-        promo_candidates = find_promo_alternatives(client, cart_context, slug) if slug else []
+        promo_candidates = find_promo_alternatives(client, cart_context, old_slug) if old_slug else []
         if promo_candidates:
             chosen = _pick_promo_replacement(promo_candidates, input_fn, print_fn)
         else:
@@ -196,19 +193,21 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
     if chosen is None:
         return 1
 
-    old_label = old_product.get("name") or old_id
-    new_label = chosen.get("name") or chosen.get("id")
+    old_label = old_product.get("name") or old_slug
+    new_label = chosen.get("name") or chosen.get("slug") or chosen.get("id")
     confirm = input_fn(f"Replace {old_label} with {new_label}? [y/N] ").strip().lower()
     if confirm not in ("y", "yes"):
         print_fn("Aborted: cart left unchanged.")
         return 0
 
     try:
-        result = swap_cart_item(client, cart_context, old_id, chosen)
+        result = swap_cart_item(client, cart_context, old_slug, chosen)
     except CartEditError as exc:
         print_fn(f"cart edit: {exc}")
         return 1
-    print_fn(f"Replaced {result.removed_product_id} with {result.added_product_id} ({result.added_price:.2f})")
+    # Free-text search results aren't guaranteed to carry a slug, so fall
+    # back to the label already shown to the user rather than printing "None".
+    print_fn(f"Replaced {result.removed_slug} with {result.added_slug or new_label} ({result.added_price:.2f})")
     return 0
 
 
@@ -251,7 +250,12 @@ def _run_deals(client, limit, log_store, input_fn, print_fn) -> int:
         print_fn("No current deals found.")
         return 0
     for deal in deals:
-        print_fn(f"{deal.name}: {deal.price:.2f} (was {deal.old_price:.2f}, -{deal.discount_pct:.0f}%)")
+        line = f"{deal.name}: {deal.price:.2f} (was {deal.old_price:.2f}, -{deal.discount_pct:.0f}%)"
+        # Issue #50: the slug is what `cart edit --replace` takes, so a deal
+        # is only actionable with it printed. Omitted when absent.
+        if deal.slug:
+            line += f"  {deal.slug}"
+        print_fn(line)
     return 0
 
 
@@ -287,16 +291,22 @@ def _run_cart_promos(client, log_store, input_fn, print_fn) -> int:
     for item in cart_context.products:
         name = item.get("name") or item.get("productId") or "?"
         slug = item.get("slug")
-        print_fn(f"{name}:")
+        # Issue #50: both halves of a swap must be addressable -- the cart
+        # item's slug is `--replace`'s *old* argument, each alternative's is
+        # the *new* one.
+        print_fn(f"{name}:  {slug}" if slug else f"{name}:")
         candidates = find_promo_alternatives(client, cart_context, slug) if slug else []
         if not candidates:
             print_fn("  no discounted alternatives found.")
             continue
         for candidate in candidates:
-            print_fn(
+            line = (
                 f"  - {candidate.name}: {candidate.price:.2f} (was {candidate.old_price:.2f}, "
                 f"-{candidate.discount:.2f})"
             )
+            if candidate.slug:
+                line += f"  {candidate.slug}"
+            print_fn(line)
     return 0
 
 
@@ -369,15 +379,17 @@ what it does, in order (interactive, no flags):
      untouched
 
 non-interactive scripting:
-  silpo-agent cart edit --replace <old-product-id> <new-product-id>
-performs the same swap with zero prompts. <new-product-id> is resolved via
-the same free-text product search as the interactive flow, using the id
-itself as the search query and matching a candidate by exact id -- there is
-no per-id product lookup tool in this API, so it must be a real, currently
-searchable product id (an id copied from a search result, another cart, or
-a past order -- not an arbitrary/invented string).
+  silpo-agent cart edit --replace <old-slug> <new-slug>
+performs the same swap with zero prompts. both arguments are product slugs,
+exactly as printed by `cart`, `deals`, `favorites-deals` and `cart promos` --
+copy one from there rather than constructing it, slugs are generated by Silpo
+and cannot be derived from a product name.
 
-an old id not actually in your cart, or a new id/search that resolves to
+<old-slug> is matched against your cart's own lines, locally, with no network
+call. <new-slug> is resolved via silpo_get_product_details, a real per-slug
+lookup that also carries back the companyId/branchId the cart write needs.
+
+an old slug not actually in your cart, or a new slug that resolves to
 nothing, errors clearly and leaves the cart untouched.
 """
 
@@ -487,10 +499,10 @@ def main(
     edit_parser.add_argument(
         "--replace",
         nargs=2,
-        metavar=("OLD_PRODUCT_ID", "NEW_PRODUCT_ID"),
+        metavar=("OLD_SLUG", "NEW_SLUG"),
         default=None,
-        help="Non-interactive: replace OLD_PRODUCT_ID with NEW_PRODUCT_ID, zero prompts. NEW_PRODUCT_ID must be "
-        "a real, currently searchable product id (resolved via free-text search on the id itself).",
+        help="Non-interactive: replace OLD_SLUG with NEW_SLUG, zero prompts. Both are product slugs as printed "
+        "by `cart`, `deals`, `favorites-deals` and `cart promos`.",
     )
     cart_subparsers.add_parser(
         "promos",

@@ -41,6 +41,40 @@ def test_populated_cart_shows_items_payable_total_and_bonus():
     assert "empty" not in text.lower()
 
 
+def test_cart_lines_carry_the_slug_so_cart_edit_can_act_on_them(capsys):
+    """Issue #50: `cart edit --replace` takes slugs, so `cart` -- the only
+    source of an item's identifier -- must print it, or the read/act loop
+    can't be closed without dropping to raw MCP calls."""
+    products = [
+        {
+            "productId": "1ed0762e-b3f9-6ca8-bdbf-dd63763181f9",
+            "slug": "moloko-ferma-ultrapasteryzovane-2-5-576829",
+            "name": "Молоко «Ферма» ультрапастеризоване 2,5%",
+            "quantity": 2,
+            "price": 49.9,
+            "stock": 189,
+        }
+    ]
+    context = _context(products=products)
+
+    text = "\n".join(format_cart(context))
+
+    assert "moloko-ferma-ultrapasteryzovane-2-5-576829" in text
+
+
+def test_product_without_a_slug_renders_without_a_dangling_identifier():
+    """Not every product record is guaranteed to carry a slug. A missing one
+    is omitted entirely rather than rendered as "?" -- an unusable
+    identifier is worse than none, it invites a failing `--replace`."""
+    products = [{"productId": "p1", "name": "Milk 1L", "quantity": 1, "price": 49.9, "stock": 3}]
+    context = _context(products=products)
+
+    text = "\n".join(format_cart(context))
+
+    assert "None" not in text
+    assert text.rstrip().endswith("(stock: 3)")
+
+
 def test_cart_with_validations_shows_them_without_blocking():
     validations = [
         {"level": "error", "type": "timeslot", "message": "timeslot.not_found", "context": []},

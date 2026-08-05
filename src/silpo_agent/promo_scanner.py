@@ -43,6 +43,10 @@ DEFAULT_CATEGORY_CAP = 20
 class Deal:
     product_id: str
     name: str
+    # Issue #50: the product record's own slug, carried through untouched --
+    # it's this CLI's public product identifier (what `cart edit --replace`
+    # takes) and the only one `silpo_get_product_details` can resolve.
+    slug: str | None
     price: float
     old_price: float
     discount_pct: float
@@ -110,6 +114,7 @@ def scan_deals(
                 Deal(
                     product_id=product.get("id"),
                     name=product.get("name") or "",
+                    slug=product.get("slug"),
                     price=product.get("price"),
                     old_price=product.get("oldPrice"),
                     discount_pct=pct,
