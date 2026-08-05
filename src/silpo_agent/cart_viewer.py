@@ -37,7 +37,16 @@ def format_cart(context: CartContext) -> list[str]:
             quantity = _or_unknown(product.get("quantity"))
             price = _or_unknown(product.get("price"))
             stock = _or_unknown(product.get("stock"))
-            lines.append(f"  - {name} x{quantity} @ {price} (stock: {stock})")
+            line = f"  - {name} x{quantity} @ {price} (stock: {stock})"
+            # Issue #50: the slug is this CLI's public product identifier --
+            # `cart edit --replace` takes slugs, and this is the only command
+            # that lists what's currently in the cart, so without it the
+            # read/act loop can't be closed. Omitted entirely when absent:
+            # a "?" would be an identifier that's guaranteed to fail.
+            slug = product.get("slug")
+            if slug:
+                line += f"  {slug}"
+            lines.append(line)
 
     if context.validations:
         lines.append("Validations:")

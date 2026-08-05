@@ -1,6 +1,11 @@
 from silpo_agent.auth import MCPError
 from silpo_agent.cart_context import CartContext
-from silpo_agent.cart_editor import CartEditError, search_replacement_candidates, swap_cart_item
+from silpo_agent.cart_editor import (
+    CartEditError,
+    resolve_product_by_slug,
+    search_replacement_candidates,
+    swap_cart_item,
+)
 
 
 class FakeClient:
@@ -31,18 +36,71 @@ def _batch_response(query, products):
     return {"success": True, "queries": [{"query": query, "totalFound": len(products), "products": products}]}
 
 
+# --- resolve_product_by_slug -----------------------------------------
+
+
+def _product_details_response(slug):
+    """Real live-verified `silpo_get_product_details` response (issue #50,
+    see docs/mcp_schema.md) -- note the `{"product": {...}}` wrapper, and
+    that `companyId`/`branchId` come back on the record itself."""
+    return {
+        "success": True,
+        "product": {
+            "id": "1ed07691-5224-68b2-99ed-dd63763181f9",
+            "name": "Ряжанка «Ферма» 3,2%",
+            "slug": slug,
+            "price": 66.9,
+            "oldPrice": 88.49,
+            "stock": 6,
+            "available": True,
+            "companyId": "1ec88c5d-a050-669c-8467-570a157f3e31",
+            "branchId": "1ee56cbf-071e-6c1c-a437-67a8740f8c75",
+        },
+    }
+
+
+def test_resolve_product_by_slug_uses_the_real_details_call_not_a_text_search():
+    """Issue #50: replacements resolve through `silpo_get_product_details`,
+    a deterministic per-slug lookup -- not the old indirect path of using an
+    id as a free-text search query and matching by exact id (issue #18)."""
+    context = cart_context()
+    client = FakeClient({"silpo_get_product_details": _product_details_response("riazhanka-ferma-3-2-837453")})
+
+    product = resolve_product_by_slug(client, context, "riazhanka-ferma-3-2-837453")
+
+    assert product["id"] == "1ed07691-5224-68b2-99ed-dd63763181f9"
+    assert product["companyId"] == "1ec88c5d-a050-669c-8467-570a157f3e31"
+    assert (
+        "silpo_get_product_details",
+        {
+            "branchId": "b1",
+            "slug": "riazhanka-ferma-3-2-837453",
+            "deliveryType": "DeliveryHome",
+            "timeslotStart": "2026-08-04T10:00:00",
+            "timeslotEnd": "2026-08-04T12:00:00",
+        },
+    ) in client.calls
+    assert all(call[0] != "silpo_find_products_batch" for call in client.calls)
+
+
+def test_resolve_product_by_slug_returns_none_for_an_unknown_slug():
+    context = cart_context()
+    client = FakeClient({"silpo_get_product_details": {"success": True}})
+
+    assert resolve_product_by_slug(client, context, "no-such-slug") is None
+
+
 # --- swap_cart_item ---------------------------------------------------
 
 
 def test_swap_cart_item_removes_old_and_adds_new():
-    context = cart_context(products=[{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}])
+    context = cart_context(products=[{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity":1}])
     client = FakeClient()
     new_product = {"id": "oat-milk", "companyId": "c2", "branchId": "b2", "price": 55.0, "name": "Oat Milk"}
 
     result = swap_cart_item(client, context, "milk", new_product)
 
-    assert result.removed_product_id == "milk"
-    assert result.added_product_id == "oat-milk"
+    assert result.removed_slug == "milk"
     assert result.added_price == 55.0
     assert (
         "silpo_remove_cart_products",
@@ -69,8 +127,49 @@ def test_swap_cart_item_removes_old_and_adds_new():
     assert tool_order.index("silpo_remove_cart_products") < tool_order.index("silpo_add_or_update_cart_products")
 
 
+def test_swap_cart_item_takes_a_slug_and_removes_by_the_lines_product_id():
+    """Issue #50: slug is the CLI's public product identifier, so the old
+    item is named by slug. The UUID never leaves the module -- it's read off
+    the matched cart line for the `silpo_remove_cart_products` call."""
+    context = cart_context(
+        products=[
+            {
+                "productId": "1ed0762e-b3f9-6ca8-bdbf-dd63763181f9",
+                "slug": "moloko-ferma-ultrapasteryzovane-2-5-576829",
+                "companyId": "c1",
+                "branchId": "b1",
+                "quantity": 1,
+            }
+        ]
+    )
+    client = FakeClient()
+    new_product = {"id": "oat-milk-uuid", "slug": "oat-milk", "companyId": "c2", "branchId": "b2", "price": 55.0}
+
+    result = swap_cart_item(client, context, "moloko-ferma-ultrapasteryzovane-2-5-576829", new_product)
+
+    assert result.removed_slug == "moloko-ferma-ultrapasteryzovane-2-5-576829"
+    assert result.added_slug == "oat-milk"
+    assert (
+        "silpo_remove_cart_products",
+        {"shoppingCartId": "cart-1", "products": [{"productId": "1ed0762e-b3f9-6ca8-bdbf-dd63763181f9"}]},
+    ) in client.calls
+
+
+def test_swap_cart_item_unknown_slug_raises_before_any_call():
+    context = cart_context(products=[{"productId": "p1", "slug": "bread", "companyId": "c1", "quantity": 1}])
+    client = FakeClient()
+
+    try:
+        swap_cart_item(client, context, "no-such-slug", {"id": "x", "slug": "x", "price": 1.0})
+        assert False, "expected CartEditError"
+    except CartEditError as exc:
+        assert "no-such-slug" in str(exc)
+
+    assert client.calls == []
+
+
 def test_swap_cart_item_preserves_old_quantity():
-    context = cart_context(products=[{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 3}])
+    context = cart_context(products=[{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity":3}])
     client = FakeClient()
     new_product = {"id": "oat-milk", "companyId": "c2", "branchId": "b2", "price": 55.0}
 
@@ -82,7 +181,7 @@ def test_swap_cart_item_preserves_old_quantity():
 
 def test_swap_cart_item_falls_back_to_cart_context_branch_and_company():
     context = cart_context(
-        products=[{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}],
+        products=[{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity":1}],
         branch_id="ctx-b",
         company_id="ctx-c",
     )
@@ -116,7 +215,7 @@ def test_swap_cart_item_add_failure_after_remove_rolls_back_and_raises_clear_err
     vanish -- swap_cart_item attempts a best-effort re-add of the old item
     (same productId/companyId/branchId/quantity just removed) before
     raising, and the error message says what happened."""
-    context = cart_context(products=[{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 2}])
+    context = cart_context(products=[{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity":2}])
 
     def add_response(args):
         if args["products"][0]["productId"] == "oat-milk":
@@ -148,7 +247,7 @@ def test_swap_cart_item_add_failure_after_remove_rolls_back_and_raises_clear_err
 
 
 def test_swap_cart_item_add_and_rollback_both_fail_reports_inconsistent_state():
-    context = cart_context(products=[{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}])
+    context = cart_context(products=[{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity":1}])
 
     def add_response(args):
         raise MCPError("add failed")
@@ -172,7 +271,7 @@ def test_swap_cart_item_add_and_rollback_both_fail_reports_inconsistent_state():
 
 
 def test_swap_cart_item_new_product_without_id_raises_and_makes_no_calls():
-    context = cart_context(products=[{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}])
+    context = cart_context(products=[{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity":1}])
     client = FakeClient()
 
     try:

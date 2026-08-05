@@ -11,24 +11,24 @@ Real schema (see docs/mcp_schema.md's "Cart tools" section, live-verified):
   "comment"}]}`. There is no in-place "update this line" call -- remove-then-
   add is the only way to change a cart item.
 
-No per-id product lookup tool exists in this API (the closest,
-`silpo_get_product_details`, needs a `slug`, which nothing here has). Every
-replacement candidate -- whether from the interactive free-text search or
-the `--replace <old-id> <new-id>` flag -- is therefore resolved the same
-way: a `silpo_find_products_batch` free-text search (same pattern
-`substitution_resolver.py` already uses, including its fallback of using a
-raw product id as the query text when no better text is available), with
-plastic-bag candidates (`cart_writer.py`'s `_is_plastic_bag` heuristic)
-filtered out of the results before they're ever shown or matched. `cli.py`'s
-`--replace` handling searches using the new-product-id itself as the query
-and matches a candidate by exact id -- see cli.py's `_run_cart_edit` for the
-full reasoning on why this is the flag's chosen semantics.
+Products are addressed by **slug**, not by product id (issue #50) -- see
+`resolve_product_by_slug` below and docs/mcp_schema.md's issue #50 section.
+Two resolution paths exist, for two different situations:
 
-No-partial-mutation guarantee: `swap_cart_item` validates the old product is
+- `--replace <old-slug> <new-slug>` resolves the new product with
+  `silpo_get_product_details`, a real per-slug lookup. Deterministic, and it
+  returns `companyId`/`branchId` on the record itself.
+- the interactive flow's free-text search still goes through
+  `silpo_find_products_batch` (same pattern `substitution_resolver.py`
+  uses), because there the user types words, not a slug. Plastic-bag
+  candidates (`cart_writer.py`'s `_is_plastic_bag` heuristic) are filtered
+  out of those results before they're ever shown.
+
+No-partial-mutation guarantee: `swap_cart_item` validates the old slug is
 actually a line in the cart (via `CartContext.products`, no extra network
 call needed -- same pattern the Cart Writer's non-empty-cart guard uses) and
 that the resolved new product record actually has an id, before either the
-remove or the add call is made. An old id not in the cart, or a new product
+remove or the add call is made. An old slug not in the cart, or a new product
 record with no id, raises `CartEditError` and makes zero MCP calls.
 
 Failure *between* the two calls (remove succeeds, add doesn't) is a second,
@@ -60,8 +60,10 @@ class CartEditError(Exception):
 
 @dataclass(frozen=True)
 class CartEditResult:
-    removed_product_id: str
-    added_product_id: str
+    # Issue #50: reported in slugs, not UUIDs -- slug is what this CLI
+    # publishes and what `--replace` takes, so it's what the user sees back.
+    removed_slug: str
+    added_slug: str | None
     added_price: float
 
 
@@ -70,8 +72,11 @@ def _is_plastic_bag(product: dict) -> bool:
     return _PLASTIC_BAG_KEYWORD in name.lower()
 
 
-def _find_cart_product(cart_context: CartContext, product_id: str) -> dict | None:
-    return next((p for p in cart_context.products if p.get("productId") == product_id), None)
+def _find_cart_product(cart_context: CartContext, slug: str) -> dict | None:
+    """Cart lines are addressed by slug (issue #50). Matched locally against
+    `CartContext.products` -- no network call, same as when this matched on
+    `productId`."""
+    return next((p for p in cart_context.products if p.get("slug") == slug), None)
 
 
 def search_replacement_candidates(client, cart_context: CartContext, query: str) -> list[dict]:
@@ -98,6 +103,39 @@ def search_replacement_candidates(client, cart_context: CartContext, query: str)
     return [candidate for candidate in candidates if not _is_plastic_bag(candidate)]
 
 
+def resolve_product_by_slug(client, cart_context: CartContext, slug: str) -> dict | None:
+    """Resolves a slug to a full product record via `silpo_get_product_details`
+    (issue #50). Returns None if the slug doesn't resolve.
+
+    Real live-verified request/response (docs/mcp_schema.md): the call takes
+    `{branchId, slug, deliveryType, timeslotStart, timeslotEnd}` and answers
+    `{"success", "product": {"id", "name", "slug", "price", "oldPrice",
+    "stock", "available", "companyId", "branchId", ...}}` -- note the
+    `"product"` wrapper, and that `companyId`/`branchId` come back on the
+    record itself. That last part matters: it means the replacement path
+    never has to fall back to `CartContext.company_id`, which is `None` on
+    the issue #29 no-shipments path.
+
+    This replaces the previous resolution path, which used a product id as a
+    free-text `silpo_find_products_batch` query and matched a candidate by
+    exact id -- indirect, and unreliable for exactly the reason issue #18
+    documents (a raw UUID as search text usually returns nothing)."""
+    response = (
+        client.call(
+            "silpo_get_product_details",
+            {
+                "branchId": cart_context.branch_id,
+                "slug": slug,
+                "deliveryType": cart_context.delivery_type,
+                "timeslotStart": cart_context.timeslot_start,
+                "timeslotEnd": cart_context.timeslot_end,
+            },
+        )
+        or {}
+    )
+    return response.get("product") or None
+
+
 def _add_call(client, cart_context: CartContext, product_id: str, company_id, branch_id, quantity):
     return client.call(
         "silpo_add_or_update_cart_products",
@@ -117,20 +155,25 @@ def _add_call(client, cart_context: CartContext, product_id: str, company_id, br
     )
 
 
-def swap_cart_item(client, cart_context: CartContext, old_product_id: str, new_product: dict) -> CartEditResult:
-    """Removes `old_product_id` from the cart and adds `new_product` (a full
-    resolved product record -- id/companyId/branchId/price, e.g. from
-    `search_replacement_candidates`). Preserves the old line's quantity.
-    Raises `CartEditError` -- making zero MCP calls -- if `old_product_id`
-    isn't actually in the cart or `new_product` has no id.
+def swap_cart_item(client, cart_context: CartContext, old_slug: str, new_product: dict) -> CartEditResult:
+    """Removes the cart line whose slug is `old_slug` and adds `new_product`
+    (a full resolved product record -- id/companyId/branchId/price, e.g.
+    from `resolve_product_by_slug`). Preserves the old line's quantity.
+    Raises `CartEditError` -- making zero MCP calls -- if `old_slug` isn't
+    actually in the cart or `new_product` has no id.
+
+    Slugs in, slugs out (issue #50): the product UUIDs the MCP calls need are
+    read off the matched cart line and off `new_product`, never asked of the
+    caller.
 
     If the add call fails after the remove already succeeded, attempts a
     best-effort rollback (re-adding the old item) and always raises
     `CartEditError` describing what happened -- see module docstring."""
-    old_item = _find_cart_product(cart_context, old_product_id)
+    old_item = _find_cart_product(cart_context, old_slug)
     if old_item is None:
-        raise CartEditError(f"{old_product_id!r} is not in your cart.")
+        raise CartEditError(f"{old_slug!r} is not in your cart.")
 
+    old_product_id = old_item.get("productId")
     new_id = new_product.get("id") or new_product.get("productId")
     if not new_id:
         raise CartEditError("Replacement product has no id; cannot add to cart.")
@@ -153,29 +196,31 @@ def swap_cart_item(client, cart_context: CartContext, old_product_id: str, new_p
         # from client.call(), not just MCPError (see auth.py's call_tool_http
         # -- _post_json isn't wrapped), and both must trigger the rollback.
         _attempt_rollback_and_raise(
-            client, cart_context, old_product_id, old_company_id, old_branch_id, quantity, new_id, add_exc
+            client, cart_context, old_slug, old_product_id, old_company_id, old_branch_id, quantity, new_id, add_exc
         )
 
     return CartEditResult(
-        removed_product_id=old_product_id, added_product_id=new_id, added_price=new_product.get("price", 0.0)
+        removed_slug=old_slug,
+        added_slug=new_product.get("slug"),
+        added_price=new_product.get("price", 0.0),
     )
 
 
 def _attempt_rollback_and_raise(
-    client, cart_context, old_product_id, old_company_id, old_branch_id, quantity, new_id, add_exc
+    client, cart_context, old_slug, old_product_id, old_company_id, old_branch_id, quantity, new_id, add_exc
 ):
-    """Removed `old_product_id` but the add of `new_id` blew up (`add_exc`).
-    Best-effort re-add of the old item, then always raise -- the caller must
-    never see a normal return with the cart silently missing an item."""
+    """Removed the `old_slug` line but the add of `new_id` blew up
+    (`add_exc`). Best-effort re-add of the old item, then always raise -- the
+    caller must never see a normal return with the cart silently missing an
+    item. Messages name the slug, the identifier the user actually holds."""
     try:
         _add_call(client, cart_context, old_product_id, old_company_id, old_branch_id, quantity)
     except Exception:  # noqa: BLE001 -- same broad-catch reasoning as above
         raise CartEditError(
-            f"Removed {old_product_id!r}, failed to add {new_id!r} ({add_exc}), and failed to restore "
-            f"{old_product_id!r} -- your cart may be missing an item, please check manually."
+            f"Removed {old_slug!r}, failed to add {new_id!r} ({add_exc}), and failed to restore "
+            f"{old_slug!r} -- your cart may be missing an item, please check manually."
         ) from add_exc
 
     raise CartEditError(
-        f"Removed {old_product_id!r} but failed to add {new_id!r} ({add_exc}); restored {old_product_id!r} "
-        "to your cart."
+        f"Removed {old_slug!r} but failed to add {new_id!r} ({add_exc}); restored {old_slug!r} to your cart."
     ) from add_exc

@@ -1140,3 +1140,56 @@ picking which cart item to replace; an item with no discounted alternatives
 (empty list, or no `slug` on the cart line at all) prints a message and
 falls straight through to the free-text path instead of erroring or
 re-prompting for a mode.
+
+## Live-verified + design decision, issue #50 (slug as the public product identifier)
+
+**Re-verified live 2026-08-05** against the real account, confirming the
+`silpo_get_product_details` entry under "Product search / replacement tools"
+exactly as documented there. Request:
+
+```json
+{"branchId": "1ee56cbf-071e-6c1c-a437-67a8740f8c75",
+ "slug": "riazhanka-ferma-3-2-837453",
+ "deliveryType": "DeliveryHome",
+ "timeslotStart": "2026-08-05T07:00:00+00:00",
+ "timeslotEnd": "2026-08-05T08:30:00+00:00"}
+```
+
+Response (trimmed to the fields that matter here):
+
+```json
+{"success": true, "product": {
+  "id": "1ed07691-5224-68b2-99ed-dd63763181f9",
+  "name": "Ряжанка «Ферма» 3,2%", "slug": "riazhanka-ferma-3-2-837453",
+  "price": 66.9, "oldPrice": 88.49, "stock": 6, "available": true,
+  "companyId": "1ec88c5d-a050-669c-8467-570a157f3e31",
+  "branchId": "1ee56cbf-071e-6c1c-a437-67a8740f8c75"}}
+```
+
+Two response facts drive the design:
+
+1. `companyId` and `branchId` come back **on the record itself**. The
+   replacement path therefore never falls back to `CartContext.company_id`,
+   which is `None` on the issue #29 no-shipments path (see
+   `_branch_context_from_delivery_types` -- `silpo_get_available_delivery_types`
+   carries no `companyId`).
+2. `available` and `stock` are per-slug and authoritative. Not consumed yet;
+   noted because it is a real fix path for issue #18's blind availability
+   check, which currently judges an item from `products[0]` of a free-text
+   search without comparing that result's id back to the item's own.
+
+**This supersedes the issue #30 decision above.** `--replace` now takes two
+slugs, not two product ids, and resolves the new one through
+`silpo_get_product_details` (a deterministic per-slug lookup) rather than
+using an id as a free-text `silpo_find_products_batch` query and matching by
+exact id. That path is deleted, not kept alongside: every read-only command
+now prints slugs, so nothing in the CLI's own output produces a product id
+for a user to pass, and the search-by-id resolver would be unreachable code
+with issue #18's known-unreliable behavior behind it. The old slug is matched
+locally against `CartContext.products` -- no network call, same as when it
+matched on `productId`.
+
+Note the tool's own description is explicit that a `slug` must come from a
+prior `silpo_find_products_batch` / `silpo_get_products` result and must
+never be constructed from a product name. This is why the CLI *prints*
+slugs rather than expecting users to know them.

@@ -992,8 +992,8 @@ def _deals_fixture_responses():
         "silpo_get_products": {
             "success": True,
             "products": [
-                {"id": "milk", "name": "Молоко", "price": 60.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"},
-                {"id": "bread", "name": "Хліб", "price": 45.0, "oldPrice": 50.0, "companyId": "c1", "branchId": "b1"},
+                {"id": "milk", "slug": "moloko-ferma-2-5-576829", "name": "Молоко", "price": 60.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"},
+                {"id": "bread", "slug": "khlib-kyivskyi-500g", "name": "Хліб", "price": 45.0, "oldPrice": 50.0, "companyId": "c1", "branchId": "b1"},
                 {"id": "bag1", "name": "Пакет-майка", "price": 1.0, "oldPrice": 3.0, "companyId": "c1", "branchId": "b1"},
             ],
         },
@@ -1010,6 +1010,18 @@ def test_deals_command_lists_top_discounts_sorted_and_filters_bags(capsys):
     assert out.index("Молоко") < out.index("Хліб")
     assert "Пакет-майка" not in out
     assert ("silpo_get_promotions", {"branchId": "b1", "deliveryType": "DeliveryHome", "timeslotStart": "2026-08-05T10:00:00", "timeslotEnd": "2026-08-05T12:00:00"}) in client.calls
+
+
+def test_deals_lines_carry_the_slug_so_they_can_be_fed_to_cart_edit(capsys):
+    """Issue #50: a deal is only actionable if it can be handed straight to
+    `cart edit --replace`, which takes slugs."""
+    client = FakeClient(_deals_fixture_responses())
+
+    main(["deals"], client=client)
+
+    out = capsys.readouterr().out
+    assert "moloko-ferma-2-5-576829" in out
+    assert "khlib-kyivskyi-500g" in out
 
 
 def test_deals_limit_flag_controls_result_count(capsys):
@@ -1160,6 +1172,35 @@ def test_cart_promos_shows_ranked_discounted_alternatives_per_item(capsys):
     assert "White Bread" in out
     assert "no discounted alternatives" in out.lower()
     assert not any(call[0] in _MUTATING_TOOLS for call in client.calls)
+
+
+def test_cart_promos_prints_slugs_for_both_sides_of_a_swap(capsys):
+    """Issue #50: `cart promos` is the command whose whole point is feeding
+    `cart edit --replace`, so both halves of the pair must be addressable --
+    the cart item's own slug (the *old* argument) and each alternative's
+    slug (the *new* one)."""
+    client = _CartPromosClient(
+        _cart_with_products(
+            {
+                "productId": "milk-1", "companyId": "c1", "branchId": "b1",
+                "slug": "milk-2-5", "name": "Milk 2.5%", "quantity": 1, "price": 45.0,
+            },
+        ),
+        similar_by_slug={
+            "milk-2-5": {
+                "success": True,
+                "products": [
+                    {"id": "milk-cheap", "name": "Milk 3.2% promo", "slug": "milk-3-2", "price": 38.0, "oldPrice": 50.0},
+                ],
+            },
+        },
+    )
+
+    main(["cart", "promos"], client=client)
+
+    out = capsys.readouterr().out
+    assert "milk-2-5" in out
+    assert "milk-3-2" in out
 
 
 def test_cart_promos_on_empty_cart_reports_cleanly_without_error(capsys):

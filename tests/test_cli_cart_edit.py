@@ -43,13 +43,19 @@ def _batch(query, products):
     return {"success": True, "queries": [{"query": query, "totalFound": len(products), "products": products}]}
 
 
+def _details(product):
+    """Real `silpo_get_product_details` response shape (issue #50,
+    live-verified) -- the product record sits under a `"product"` key."""
+    return {"success": True, "product": product}
+
+
 def test_cart_edit_interactive_happy_path_swaps_item(capsys, tmp_path):
-    products = [{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
     client = FakeClient(
         {
             **_resolved_cart_context_with_products(products),
             "silpo_find_products_batch": _batch(
-                "oat milk", [{"id": "oat-milk", "name": "Oat Milk", "price": 55.0, "companyId": "c1", "branchId": "b1"}]
+                "oat milk", [{"id": "oat-milk", "slug": "oat-milk", "name": "Oat Milk", "price": 55.0, "companyId": "c1", "branchId": "b1"}]
             ),
         }
     )
@@ -84,12 +90,12 @@ def test_cart_edit_interactive_happy_path_swaps_item(capsys, tmp_path):
 
 
 def test_cart_edit_interactive_decline_confirmation_leaves_cart_untouched(capsys, tmp_path):
-    products = [{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
     client = FakeClient(
         {
             **_resolved_cart_context_with_products(products),
             "silpo_find_products_batch": _batch(
-                "oat milk", [{"id": "oat-milk", "name": "Oat Milk", "price": 55.0}]
+                "oat milk", [{"id": "oat-milk", "slug": "oat-milk", "name": "Oat Milk", "price": 55.0}]
             ),
         }
     )
@@ -106,12 +112,21 @@ def test_cart_edit_interactive_decline_confirmation_leaves_cart_untouched(capsys
 
 
 def test_cart_edit_replace_flag_swaps_with_zero_prompts(capsys, tmp_path):
-    products = [{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 2}]
+    """Issue #50: both arguments are slugs, and the new one resolves through
+    `silpo_get_product_details` -- never the old free-text search path."""
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 2}]
     client = FakeClient(
         {
             **_resolved_cart_context_with_products(products),
-            "silpo_find_products_batch": _batch(
-                "oat-milk", [{"id": "oat-milk", "name": "Oat Milk", "price": 55.0, "companyId": "c2", "branchId": "b2"}]
+            "silpo_get_product_details": _details(
+                {
+                    "id": "oat-milk-uuid",
+                    "slug": "oat-milk",
+                    "name": "Oat Milk",
+                    "price": 55.0,
+                    "companyId": "c2",
+                    "branchId": "b2",
+                }
             ),
         }
     )
@@ -127,20 +142,24 @@ def test_cart_edit_replace_flag_swaps_with_zero_prompts(capsys, tmp_path):
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "Replaced milk with oat-milk" in out
+    assert all(call[0] != "silpo_find_products_batch" for call in client.calls)
     added_call = next(c for c in client.calls if c[0] == "silpo_add_or_update_cart_products")
     # quantity preserved from the old cart line, company/branch from the
     # resolved replacement product (not the cart context's).
+    assert added_call[1]["products"][0]["productId"] == "oat-milk-uuid"
     assert added_call[1]["products"][0]["quantity"] == 2
     assert added_call[1]["products"][0]["companyId"] == "c2"
     assert added_call[1]["products"][0]["branchId"] == "b2"
 
 
 def test_cart_edit_replace_old_id_not_in_cart_errors_without_mutating(capsys, tmp_path):
-    products = [{"productId": "bread", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    products = [{"productId": "bread", "slug": "bread", "companyId": "c1", "branchId": "b1", "quantity": 1}]
     client = FakeClient(
         {
             **_resolved_cart_context_with_products(products),
-            "silpo_find_products_batch": _batch("oat-milk", [{"id": "oat-milk", "name": "Oat Milk", "price": 55.0}]),
+            "silpo_get_product_details": _details(
+                {"id": "oat-milk-uuid", "slug": "oat-milk", "name": "Oat Milk", "price": 55.0}
+            ),
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -160,11 +179,13 @@ def test_cart_edit_replace_old_id_not_in_cart_errors_without_mutating(capsys, tm
 
 
 def test_cart_edit_replace_new_item_not_found_errors_without_mutating(capsys, tmp_path):
-    products = [{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
+    """An unresolvable slug: `silpo_get_product_details` answers without a
+    `product`, and nothing is mutated."""
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}]
     client = FakeClient(
         {
             **_resolved_cart_context_with_products(products),
-            "silpo_find_products_batch": _batch("nonexistent", []),
+            "silpo_get_product_details": {"success": True},
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
@@ -184,7 +205,7 @@ def test_cart_edit_replace_new_item_not_found_errors_without_mutating(capsys, tm
 
 
 def test_cart_edit_interactive_no_search_results_errors_without_mutating(capsys, tmp_path):
-    products = [{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
     client = FakeClient(
         {
             **_resolved_cart_context_with_products(products),
@@ -204,7 +225,7 @@ def test_cart_edit_interactive_no_search_results_errors_without_mutating(capsys,
 
 
 def test_cart_edit_interactive_filters_plastic_bags_from_candidates(capsys, tmp_path):
-    products = [{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
     client = FakeClient(
         {
             **_resolved_cart_context_with_products(products),
@@ -212,7 +233,7 @@ def test_cart_edit_interactive_filters_plastic_bags_from_candidates(capsys, tmp_
                 "пакет",
                 [
                     {"id": "bag1", "name": "Пакет біорозкладний 3 кг", "price": 2.0},
-                    {"id": "oat-milk", "name": "Oat Milk", "price": 55.0, "companyId": "c1", "branchId": "b1"},
+                    {"id": "oat-milk", "slug": "oat-milk", "name": "Oat Milk", "price": 55.0, "companyId": "c1", "branchId": "b1"},
                 ],
             ),
         }
@@ -262,7 +283,7 @@ def test_cart_edit_interactive_promo_browse_path_swaps_item(capsys, tmp_path):
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "Replaced milk with milk-promo" in out
+    assert "Replaced milk-slug with milk-promo-slug" in out
     assert (
         "silpo_get_similar_products",
         {"branchId": "b1", "slug": "milk-slug", "deliveryType": "DeliveryHome", "limit": 10},
@@ -304,7 +325,7 @@ def test_cart_edit_interactive_promo_browse_no_candidates_falls_back_to_free_tex
             **_resolved_cart_context_with_products(products),
             "silpo_get_similar_products": {"success": True, "products": []},
             "silpo_find_products_batch": _batch(
-                "oat milk", [{"id": "oat-milk", "name": "Oat Milk", "price": 55.0, "companyId": "c1", "branchId": "b1"}]
+                "oat milk", [{"id": "oat-milk", "slug": "oat-milk", "name": "Oat Milk", "price": 55.0, "companyId": "c1", "branchId": "b1"}]
             ),
         }
     )
@@ -317,7 +338,7 @@ def test_cart_edit_interactive_promo_browse_no_candidates_falls_back_to_free_tex
     assert exit_code == 0
     assert "no discounted alternatives" in out.lower()
     assert "falling back" in out.lower()
-    assert "Replaced milk with oat-milk" in out
+    assert "Replaced milk-slug with oat-milk" in out
     assert (
         "silpo_remove_cart_products",
         {"shoppingCartId": "cart-1", "products": [{"productId": "milk"}]},

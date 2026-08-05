@@ -32,9 +32,17 @@ class FavoriteDeal:
     name: str
     price: float
     old_price: float
+    # Issue #50: the product record's own slug -- this CLI's public product
+    # identifier, what `cart edit --replace` takes. Omitted from the
+    # formatted line when absent rather than rendered as a placeholder: an
+    # identifier that can't be resolved is worse than no identifier.
+    slug: str | None = None
 
     def format(self) -> str:
-        return f"{self.name}: {self.price:.2f} (was {self.old_price:.2f})"
+        line = f"{self.name}: {self.price:.2f} (was {self.old_price:.2f})"
+        if self.slug:
+            line += f"  {self.slug}"
+        return line
 
 
 def list_favorites_deals(client, log_store=None, *, input_fn=None, print_fn=None) -> list[FavoriteDeal]:
@@ -58,5 +66,12 @@ def list_favorites_deals(client, log_store=None, *, input_fn=None, print_fn=None
         price = product.get("price")
         old_price = product.get("oldPrice")
         if price is not None and old_price is not None and old_price > price:
-            deals.append(FavoriteDeal(name=product.get("name") or "", price=price, old_price=old_price))
+            deals.append(
+                FavoriteDeal(
+                    name=product.get("name") or "",
+                    price=price,
+                    old_price=old_price,
+                    slug=product.get("slug"),
+                )
+            )
     return deals
