@@ -1,14 +1,9 @@
 # silpo-agent-cli
 
 Personal CLI wrapper over the Silpo MCP server (`https://mcp.silpo.ua/mcp`)
-that rebuilds your Silpo cart from what you typically buy, instead of
-re-typing the same grocery list every week.
-
-One command today: `reorder`. It looks at your recent online orders, works
-out which products you buy consistently, checks they're still in stock,
-handles substitutions and (optionally) loyalty bonuses, and fills your real
-Silpo cart. It never checks out or pays — that stays a manual step in the
-Silpo app or on silpo.ua.
+for grocery shopping: rebuild your cart from what you typically buy, check
+and edit what's actually in it, and see what's on sale — without leaving
+the terminal.
 
 ## Setup
 
@@ -20,11 +15,22 @@ First run of any command that talks to the MCP server opens a browser for a
 one-time OAuth2.1+PKCE login; the token is cached in the OS keyring
 afterward, so you won't be re-prompted until it expires.
 
-## Usage
+## Commands
+
+Run `uv run silpo-agent --help` for the full list, or `<command> --help`
+for a command's flags and examples. Every command is interactive where it
+matters (address/item confirmation) — run them somewhere you're watching,
+not backgrounded.
+
+### `reorder` — rebuild the cart from your typical items
 
 ```bash
 uv run silpo-agent reorder --last 10 --threshold 0.5
 ```
+
+Looks at your recent online orders, works out which products you buy
+consistently, checks they're still in stock, handles substitutions and
+(optionally) loyalty bonuses, and fills your real Silpo cart.
 
 - `--last N` — how many of your most recent online orders to consider.
 - `--threshold T` — minimum share of those orders a product must appear in
@@ -35,29 +41,91 @@ uv run silpo-agent reorder --last 10 --threshold 0.5
 - `--optimize promos` — opt-in; applies any available loyalty bonuses to
   the cart. Omitting this flag makes zero promo-related calls.
 
-Run `uv run silpo-agent reorder --help` for the full step-by-step pipeline
-description and more examples.
+Confirms your delivery address, warns before touching a non-empty cart, and
+asks which replacement you want when an out-of-stock item has more than one
+candidate.
 
-`reorder` is interactive — it'll ask you to confirm your delivery address,
-warn before touching a non-empty cart, and ask which replacement you want
-when an out-of-stock item has more than one candidate. Run it somewhere
-you're watching, not backgrounded.
+### `cart` — view, edit, and check promos on your current cart
 
-## Claude Code skill
+```bash
+uv run silpo-agent cart            # read-only: items, payable total, bonus balance, validations
+uv run silpo-agent cart promos     # read-only: real promo alternatives for every item in the cart
+uv run silpo-agent cart edit       # interactive: replace one item (free-text search or promo browse)
+uv run silpo-agent cart edit --replace <old-product-id> <new-product-id>   # same, no prompts
+```
 
-If you drive this tool through Claude Code, there's a personal skill at
-`~/.agents/skills/silpo-agent/` that teaches Claude how to translate a
-request like "reorder my usual groceries, budget 1500" into the right
-invocation, and about this tool's quirks (interactive prompts, cart-only
-scope, where the local history lives). It's not scoped to this repo — it's
-installed for this user across projects.
+`cart edit` is the only command besides `reorder` that mutates the real
+cart — a remove-then-add swap (Silpo has no in-place quantity/item update).
+It validates the replacement is resolvable before removing anything, so a
+failed search never leaves the cart missing an item.
+
+### `deals` — best current discounts store-wide
+
+```bash
+uv run silpo-agent deals --limit 10   # default 10
+```
+
+Independent of your cart — scans active promotion categories and shows the
+top discounts by percentage off.
+
+### `favorites-deals` — your favorites that are currently discounted
+
+```bash
+uv run silpo-agent favorites-deals
+```
+
+### `coupons` — your active loyalty coupons
+
+```bash
+uv run silpo-agent coupons
+```
+
+Read-only list of what's active and what buying-condition triggers each
+one. Coupons apply automatically server-side when their condition is met —
+there's no "activate" step this tool can perform.
+
+### `delivery` — set address, delivery type, and timeslot
+
+```bash
+uv run silpo-agent delivery
+```
+
+Interactive: address (existing saved address, pick a different one, or
+enter a new one) → delivery type (`DeliveryHome`, `SelfPickup`, or
+`NovaPoshta`) → timeslot, applied in one real update to your account. Prints
+which of your current cart items are now unavailable in the new context
+afterward — informational only, nothing gets swapped automatically.
+
+### `clear-context` — wipe local reorder history and substitution memory
+
+```bash
+uv run silpo-agent clear-context
+```
+
+Asks for confirmation first. Purely local — never touches your OS keyring
+token or your real Silpo cart.
+
+## Claude Code skills
+
+Two skills exist if you drive this tool through Claude Code:
+
+- `~/.agents/skills/silpo-agent/` (personal, cross-project) — teaches Claude
+  how to translate a request like "reorder my usual groceries, budget 1500"
+  or "what's in my cart" into the right invocation, and about this tool's
+  quirks (interactive prompts, cart-only scope in `reorder`, where local
+  history lives).
+- `.claude/skills/silpo-agent-cli/` (this repo) — dev-workflow conventions
+  for *building* this CLI: TDD-first, ticket/review conventions, and the
+  live-schema gotchas already hit once (OAuth redirect_uri, MCP response
+  envelope unwrapping, wrapped vs. bare API responses).
 
 ## Local state
 
-Past runs (items added, substitutions, confirmed address, total, timestamp)
-and remembered substitution choices are logged to
+Past `reorder` runs (items added, substitutions, confirmed address, total,
+timestamp) and remembered substitution choices are logged to
 `~/.silpo-agent/reorder_log.json`, append-only. Nothing here feeds back into
 what counts as a "typical item" — only your confirmed online orders do.
+`clear-context` wipes this file.
 
 ## Tests
 
@@ -68,12 +136,14 @@ uv run pytest
 ## Project docs
 
 - `CONTEXT.md` — domain glossary (Typical item, Substitution decision,
-  Reorder flow scope, etc.) — read this before the code if a term is
-  unclear.
-- `prd_reorder_optimizer.md` — the original PRD this was built from.
+  Cart Editor, Promo Scanner, etc.) — read this before the code if a term
+  is unclear.
+- `prd_reorder_optimizer.md`, `prd_cart_and_deals.md`,
+  `prd_delivery_context_coupons.md` — the three PRDs this project was built
+  from, in order.
 - `docs/mcp_schema.md` — live-verified schema notes for every Silpo MCP
-  tool this project touches, including known gaps and assumptions (e.g.
-  Substitution Resolver's availability-check limitation).
+  tool this project touches, including known gaps, assumptions, and every
+  place a guessed schema turned out wrong once tested live.
 - `TODO.md` — module-by-module build status.
 - `idea.md` — the original brainstorm this project narrowed down from.
 
@@ -81,12 +151,18 @@ uv run pytest
 
 - Substitution Resolver's availability check searches by the typical item's
   name when known, otherwise falls back to a raw product-id UUID as the
-  search query — which usually returns nothing useful. A run reporting
-  every item "unavailable" is likely this gap, not genuine across-the-board
-  out-of-stock. See `docs/mcp_schema.md` (issue #18) for detail.
-- Promo Optimizer only applies loyalty bonuses — the original idea of
-  swapping an item for a cheaper promo equivalent was dropped (no reliable
-  per-product "find the promo version of X" tool exists on the live
-  server; see `docs/mcp_schema.md`, issue #20).
+  search query — which usually returns nothing useful. A `reorder` run
+  reporting every item "unavailable" is likely this gap, not genuine
+  across-the-board out-of-stock. See `docs/mcp_schema.md` (issue #18).
+- `reorder --optimize promos` only applies loyalty bonuses — swapping an
+  item for a cheaper promo equivalent automatically was dropped there (no
+  reliable per-product "find the promo version of X" tool exists). Manual
+  promo discovery is still possible via `cart promos` / `cart edit`'s
+  promo-browse path, which use Silpo's own similar-products engine instead
+  of a name-matching guess.
 - `week` (recipe-plan-based cart) from the original idea list was never
   built — the MCP server has no recipe/meal-planning tool.
+- `delivery`'s NovaPoshta branch resolution assumes exactly one servicing
+  branch nationwide (true for every account tested so far); if that's ever
+  false for an account, the first one found is used, with a printed note
+  rather than a picker.
