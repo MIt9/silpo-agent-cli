@@ -49,10 +49,17 @@ consistently, checks they're still in stock, handles substitutions and
   the total.
 - `--optimize promos` — opt-in; applies any available loyalty bonuses to
   the cart. Omitting this flag makes zero promo-related calls.
+- `--yes` / `-y` — non-interactive: auto-confirms the proposed delivery
+  address, auto-confirms adding to a non-empty cart, and auto-picks the
+  first candidate on any substitution with multiple replacements. Every
+  auto-answered prompt is still printed, and the report still lists the
+  address used, substitutions made, and items added.
 
 Confirms your delivery address, warns before touching a non-empty cart, and
 asks which replacement you want when an out-of-stock item has more than one
-candidate.
+candidate. `--budget` counts what's already in the cart (its own payable
+total) against the cap, not just the new items, so reordering onto a
+non-empty cart can't blow past budget.
 
 ### `cart` — view, edit, and check promos on your current cart
 
@@ -60,13 +67,23 @@ candidate.
 uv run silpo-agent cart            # read-only: items, payable total, bonus balance, validations
 uv run silpo-agent cart promos     # read-only: real promo alternatives for every item in the cart
 uv run silpo-agent cart edit       # interactive: replace one item (free-text search or promo browse)
-uv run silpo-agent cart edit --replace <old-slug> <new-slug>   # same, no prompts
+uv run silpo-agent cart edit --replace <old-slug> <new-slug>   # non-interactive swap
+uv run silpo-agent cart edit --add <new-slug> [--quantity N]   # non-interactive add, no swap
+uv run silpo-agent cart edit --qty <slug> <num>                # set an existing line's quantity (absolute, not a delta)
+uv run silpo-agent cart edit --remove <slug>                   # delete a line, nothing added back
 ```
 
+Running `silpo-agent` with no subcommand at all is the same as `cart` — it
+shows the current real cart (delivery address/type/timeslot, items, payable
+total, bonus balance) instead of just printing help.
+
 `cart edit` is the only command besides `reorder` that mutates the real
-cart — a remove-then-add swap (Silpo has no in-place quantity/item update).
-It validates the replacement is resolvable before removing anything, so a
-failed lookup never leaves the cart missing an item.
+cart. `--replace` is a remove-then-add swap (Silpo has no in-place
+quantity/item update); `--quantity` and `--qty`'s `<num>` both accept a
+fractional number (e.g. `0.5`) for weighted products sold by kg. It
+validates the replacement is resolvable, or the slug is actually a cart
+line, before mutating anything, so a failed lookup or bad slug never leaves
+the cart missing an item.
 
 **Products are addressed by slug.** Every read-only command prints each
 product's slug at the end of its line, and that is exactly what `--replace`
@@ -84,11 +101,18 @@ matched against your cart locally; the new one is resolved through
 ### `deals` — best current discounts store-wide
 
 ```bash
-uv run silpo-agent deals --limit 10   # default 10
+uv run silpo-agent deals --limit 10               # default 10
+uv run silpo-agent deals --category "Овочі"        # scope to one category
+uv run silpo-agent deals --list-categories         # list every real category title
 ```
 
 Independent of your cart — scans active promotion categories and shows the
-top discounts by percentage off.
+top discounts by percentage off. `--category` is matched against real
+category titles (exact match preferred, else the shortest title containing
+it) — if it falls back to that fuzzy match, the actual matched title is
+printed before results so a near-miss (e.g. "Вино" matching "Виноград") is
+never silent. `--list-categories` shows every real title to pick from,
+read-only, no deals fetched.
 
 ### `favorites-deals` — your favorites that are currently discounted
 
@@ -118,14 +142,17 @@ enter a new one) → delivery type (`DeliveryHome`, `SelfPickup`, or
 which of your current cart items are now unavailable in the new context
 afterward — informational only, nothing gets swapped automatically.
 
-### `clear-context` — wipe local reorder history and substitution memory
+### `clear-context` — wipe local reorder history, substitution memory, and cached login
 
 ```bash
-uv run silpo-agent clear-context
+uv run silpo-agent clear-context          # asks for confirmation first
+uv run silpo-agent clear-context --yes    # skip the confirmation prompt
 ```
 
-Asks for confirmation first. Purely local — never touches your OS keyring
-token or your real Silpo cart.
+Wipes the local Reorder Log and Substitution Memory, and clears the cached
+OAuth token from your OS keyring — a full reset that also logs you out. The
+next command needing a token triggers a fresh browser login. Never touches
+your real Silpo cart or calls the MCP server.
 
 ## Claude Code skills
 

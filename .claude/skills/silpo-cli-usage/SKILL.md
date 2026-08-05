@@ -31,13 +31,20 @@ output, it's probably waiting on that browser tab, not crashed.
 ### reorder -- place/rebuild the order
 
 ```bash
-uv run silpo-agent reorder --last N --threshold 0-1 [--budget UAH] [--optimize promos]
+uv run silpo-agent reorder --last N --threshold 0-1 [--budget UAH] [--optimize promos] [--yes]
 ```
 - `--last N` / `--threshold 0-1` are **required**. `--threshold 0.5` = item
   must appear in at least half of the last N orders to count as "typical."
 - `--budget UAH` trims least-frequent items first until total fits (omit to
-  add everything and just report total).
+  add everything and just report total). Counts what's already in the cart
+  (its own payable total) against the cap, not just the new items.
 - `--optimize promos` opt-in only; applies loyalty bonuses before checkout.
+- `--yes` / `-y` -- non-interactive: auto-confirms the proposed address,
+  auto-confirms adding to a non-empty cart, and auto-picks the first
+  candidate on multi-candidate substitutions. Every auto-answered prompt is
+  still printed, and the report still lists what was decided -- nothing
+  silent. Use this by default when running from an agent/chat context,
+  since a bare interactive `reorder` just hangs waiting on stdin.
 - No specifics from user → reasonable default `--last 10 --threshold 0.5`,
   and say that's what was picked.
 - Flow: confirm delivery address → find typical items → check stock,
@@ -56,22 +63,39 @@ uv run silpo-agent cart promos       # read-only: discounted alternatives per it
 uv run silpo-agent cart edit         # interactive: replace one item
 uv run silpo-agent cart edit --replace OLD_SLUG NEW_SLUG   # non-interactive swap
 uv run silpo-agent cart edit --add NEW_SLUG [--quantity N] # non-interactive add, no swap
+uv run silpo-agent cart edit --qty SLUG NUM                # set an existing line's quantity (absolute set, not +N)
+uv run silpo-agent cart edit --remove SLUG                 # delete a line, nothing added back
 ```
 - Plain `cart` is the read-only check -- use this (not `reorder`) when the
   user just wants to know what's in the cart, since `reorder` mutates it.
   Payable total is `totalAfterDiscounts`, not the pre-discount total.
+  Running `silpo-agent` with no subcommand at all does the same thing.
+  Cart validations that are about a specific product (e.g. out of stock,
+  over the stock ceiling) print that product's name and slug inline, so a
+  code like `product.offer.stock.max` is never left to a bare UUID lookup.
+  Weighted items (sold by kg) print their real quantity and unit (e.g.
+  `1.0 кг`), not a piece count.
 - `cart edit` interactive: lists cart items → pick one → find replacement
   by free-text search or promo alternatives (`cart promos` reused) →
   confirm swap → old item removed only after new one confirmed to exist.
-- `cart edit --replace` and `--add` slugs must come from real output
-  (`cart`, `deals`, `favorites-deals`, `cart promos`) -- never construct a
-  slug from a product name, Silpo generates them.
+- `cart edit --replace`/`--add`/`--qty`/`--remove` slugs must come from real
+  output (`cart`, `deals`, `favorites-deals`, `cart promos`) -- never
+  construct a slug from a product name, Silpo generates them. All four are
+  mutually exclusive with each other.
 - `--replace` needs an existing cart line to swap out. `--add` is for a
   brand-new item that isn't in the cart yet (e.g. a discovered deal) --
-  quantity 1 by default, `--quantity N` for more. It errors instead of
-  mutating anything if the slug is already a cart line (use `--replace` or
+  quantity 1 by default, `--quantity N` for more (accepts a fractional
+  number like `0.5` for weighted products). It errors instead of mutating
+  anything if the slug is already a cart line (use `--replace`, `--qty`, or
   `reorder` for that instead, so quantity never silently doubles).
   `--quantity` only makes sense together with `--add`.
+- `--qty SLUG NUM` changes the quantity of an item **already** in the cart
+  to the absolute value `NUM` (a set, not a delta -- `--qty milk 3` always
+  leaves you with 3 regardless of what was there). `NUM` accepts a
+  fractional number. Errors if `SLUG` isn't already a cart line -- use
+  `--add` first.
+- `--remove SLUG` deletes that cart line outright, nothing added back.
+  Errors if `SLUG` isn't actually in the cart.
 
 ### delivery -- set address, delivery type, timeslot
 
@@ -90,28 +114,39 @@ under the new delivery context (informational only, nothing auto-removed).
 ```bash
 uv run silpo-agent coupons            # active loyalty coupons: condition, validity, reward
 uv run silpo-agent favorites-deals    # own favorites currently discounted
-uv run silpo-agent deals [--limit N] [--category NAME]  # store-wide biggest discounts, default limit 10
+uv run silpo-agent deals [--limit N] [--category NAME] [--list-categories]  # store-wide biggest discounts, default limit 10
 ```
 None of these touch the cart or account.
 - `--category NAME` scopes the scan to one category (e.g. `--category
   Овочі`, `--category Пиво`) instead of every active promo store-wide.
   Matched against real category titles: exact match preferred, else the
   shortest title containing it (so "Овочі" resolves to the vegetables
-  category itself, not the broader "Фрукти, овочі"). Errors clearly if
-  nothing matches, rather than silently showing "no deals."
+  category itself, not the broader "Фрукти, овочі"). If it falls back to
+  that fuzzy substring match, the CLI prints which real title it actually
+  matched (e.g. `matched category "Виноград" for query "Вино"`) before
+  results -- never a silent near-miss. Errors clearly if nothing matches at
+  all, rather than silently showing "no deals."
+- `--list-categories` prints every real category title currently
+  available, read-only, no deals fetched -- use it to find the exact name
+  to pass to `--category` instead of guessing.
 - A parent category (e.g. "Фрукти, овочі") does **not** include its child
   categories' products (e.g. "Овочі", "Фрукти") -- Silpo's category filter
   isn't recursive. If a broad category search looks thin, try the more
   specific child category by name instead.
 
-### clear-context -- wipe local state
+### clear-context -- wipe local state and log out
 
 ```bash
-uv run silpo-agent clear-context
+uv run silpo-agent clear-context          # asks for confirmation first
+uv run silpo-agent clear-context --yes    # skip the confirmation prompt
 ```
 Deletes local Reorder Log + Substitution Memory
-(`~/.silpo-agent/reorder_log.json`) after confirmation. No MCP calls --
-never touches the OS keyring token or the real Silpo cart.
+(`~/.silpo-agent/reorder_log.json`) *and* clears the cached OAuth token
+from the OS keyring -- a full reset that also logs you out. Next command
+needing a token triggers a fresh browser login. No MCP calls -- never
+touches the real Silpo cart. `--yes`/`-y` skips the confirmation prompt;
+without it the command hangs waiting on stdin, same reasoning as
+`reorder --yes`.
 
 ## Past runs / substitution memory
 
