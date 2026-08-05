@@ -31,6 +31,7 @@ from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
 from silpo_agent.promo_finder import find_promo_alternatives
 from silpo_agent.promo_optimizer import optimize_promos
+from silpo_agent.promo_scanner import scan_deals
 from silpo_agent.substitution_resolver import resolve_substitutions
 
 
@@ -243,6 +244,17 @@ def _run_cart(client, log_store, input_fn, print_fn) -> int:
     return 0
 
 
+def _run_deals(client, limit, log_store, input_fn, print_fn) -> int:
+    cart_context = resolve_cart_context(client, log_store=log_store, input_fn=input_fn, print_fn=print_fn)
+    deals = scan_deals(client, cart_context, limit=limit)
+    if not deals:
+        print_fn("No current deals found.")
+        return 0
+    for deal in deals:
+        print_fn(f"{deal.name}: {deal.price:.2f} (was {deal.old_price:.2f}, -{deal.discount_pct:.0f}%)")
+    return 0
+
+
 def _run_coupons(client) -> int:
     lines = list_coupons(client)
     if not lines:
@@ -301,6 +313,7 @@ commands:
   delivery        explicitly set your delivery address, delivery type, and timeslot
   clear-context   wipe your local reorder history and substitution memory
   coupons         list your active loyalty coupons (read-only)
+  deals           show the best current store-wide discounts (read-only)
   favorites-deals list your favorited products currently on discount (read-only)
 
 run 'silpo-agent reorder --help' for reorder's flags and examples.
@@ -521,6 +534,20 @@ def main(
         "Read-only -- no matching/heuristic, since it's already your own explicit list.",
     )
 
+    deals_parser = subparsers.add_parser(
+        "deals",
+        help="Show the best current store-wide discounts (read-only)",
+        description="Scan active promotion categories store-wide and show the biggest current discounts, "
+        "independent of your cart. Read-only -- makes no changes to your cart or account.",
+    )
+    deals_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        metavar="N",
+        help="How many top deals to show, sorted by discount percentage descending. Default: 10.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -560,6 +587,9 @@ def main(
 
     if args.command == "favorites-deals":
         return _run_favorites_deals(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+
+    if args.command == "deals":
+        return _run_deals(client or MCPClient(), args.limit, log_store or ReorderLogStore(), input_fn, print_fn)
 
     return 0
 

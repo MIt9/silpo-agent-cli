@@ -36,5 +36,11 @@ The step, run before product search, that establishes which address/branch conte
 **Cart context resolution**:
 The step, run right after Delivery address resolution and before typical-item search, that resolves the real cart/delivery context (`shoppingCartId`, `branchId`, `companyId`, `deliveryType`, `timeslot`) most product-facing MCP tools require. Two calls: `silpo_get_my_shopping_cart` (returns only a `shoppingCartId`) then `silpo_get_shopping_cart_by_id` (returns the actual cart). Any `cart.calculation.validations[]` (e.g. a stale timeslot, an out-of-stock item) is surfaced to the user, never silently dropped, but doesn't block the run.
 
+**Deals discovery**:
+The `deals` subcommand's job: scan active promotion categories store-wide (via `silpo_get_promotions` + `silpo_get_products(mustHavePromotion=true, promotionCode=...)`) and show the biggest current discounts, independent of the user's cart. Distinct from the Similar-Products Promo Finder (`cart edit`/`cart promos`), which starts from one specific item rather than browsing store-wide. Read-only -- makes no changes to the cart or account.
+
+**Promo Scanner**:
+The module behind Deals discovery. Iterates every active promotion category, capping the products pulled per category (~20) since some categories list thousands of products live, merges the capped results across categories, computes each product's discount percentage from `price`/`oldPrice`, and sorts descending. The existing plastic-bag filter (`cart_writer.py`'s `_is_plastic_bag`) applies here too -- a bag is never a "deal."
+
 **WeekCart flow**:
 A recipe-plan-based basket generation concept — invent a week of meals, then map ingredients to products. Out of scope: the MCP server has no recipe/meal-planning tool, and LLM-freeform ingredient names would need unreliable fuzzy matching against product search.

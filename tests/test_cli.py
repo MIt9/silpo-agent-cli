@@ -968,6 +968,92 @@ def _delivery_fixture_responses():
     }
 
 
+def _deals_fixture_responses():
+    """Resolved cart context (existing cart, real shipments -- no address
+    fallback needed) plus one promotion category with a mix of discounted
+    and non-discounted products."""
+    return {
+        "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+        "silpo_get_shopping_cart_by_id": {
+            "success": True,
+            "cart": {
+                "deliveryType": "DeliveryHome",
+                "timeslot": {"start": "2026-08-05T10:00:00", "end": "2026-08-05T12:00:00"},
+                "shipments": [{"companyId": "c1", "branchId": "b1", "products": []}],
+                "calculation": {"validations": []},
+            },
+            "loyalty": {},
+        },
+        "silpo_get_promotions": {
+            "success": True,
+            "summary": "Found 1 promotions",
+            "promotions": [{"code": "dairy", "title": "Dairy deals", "productCount": 3, "url": "/promo/dairy"}],
+        },
+        "silpo_get_products": {
+            "success": True,
+            "products": [
+                {"id": "milk", "name": "Молоко", "price": 60.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"},
+                {"id": "bread", "name": "Хліб", "price": 45.0, "oldPrice": 50.0, "companyId": "c1", "branchId": "b1"},
+                {"id": "bag1", "name": "Пакет-майка", "price": 1.0, "oldPrice": 3.0, "companyId": "c1", "branchId": "b1"},
+            ],
+        },
+    }
+
+
+def test_deals_command_lists_top_discounts_sorted_and_filters_bags(capsys):
+    client = FakeClient(_deals_fixture_responses())
+
+    exit_code = main(["deals"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert out.index("Молоко") < out.index("Хліб")
+    assert "Пакет-майка" not in out
+    assert ("silpo_get_promotions", {"branchId": "b1", "deliveryType": "DeliveryHome", "timeslotStart": "2026-08-05T10:00:00", "timeslotEnd": "2026-08-05T12:00:00"}) in client.calls
+
+
+def test_deals_limit_flag_controls_result_count(capsys):
+    client = FakeClient(_deals_fixture_responses())
+
+    exit_code = main(["deals", "--limit", "1"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Молоко" in out
+    assert "Хліб" not in out
+
+
+def test_deals_default_limit_is_ten(capsys):
+    responses = _deals_fixture_responses()
+    responses["silpo_get_products"] = {
+        "success": True,
+        "products": [
+            {"id": f"p{i}", "name": f"Product {i}", "price": 100.0 - i, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"}
+            for i in range(15)
+        ],
+    }
+    client = FakeClient(responses)
+
+    exit_code = main(["deals"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert sum(1 for i in range(15) if f"Product {i}:" in out) == 10
+
+
+def test_deals_command_with_no_active_promotions_prints_clean_message(capsys):
+    responses = _deals_fixture_responses()
+    responses["silpo_get_promotions"] = {"success": True, "summary": "Found 0 promotions", "promotions": []}
+    client = FakeClient(responses)
+
+    exit_code = main(["deals"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no" in out.lower() and "deal" in out.lower()
+    assert all(call[0] != "silpo_get_products" for call in client.calls)
+
+
 def test_delivery_wires_end_to_end_and_exits_zero(capsys, tmp_path):
     client = FakeClient(_delivery_fixture_responses())
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
