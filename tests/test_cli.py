@@ -993,4 +993,96 @@ def test_delivery_invalid_selection_exits_nonzero_without_update_call(tmp_path):
     )
 
     assert exit_code == 1
+
+
+def _cart_with_products(*products):
+    """Resolved-cart-context fixture (issue #28) with real cart items, each
+    carrying its own `slug` per docs/mcp_schema.md's "Cart tools" section
+    (`cart.shipments[0].products[].slug`)."""
+    return {
+        "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+        "silpo_get_shopping_cart_by_id": {
+            "success": True,
+            "cart": {
+                "deliveryType": "DeliveryHome",
+                "timeslot": {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"},
+                "address": {"city": "Kyiv"},
+                "shipments": [{"companyId": "c1", "branchId": "b1", "products": list(products)}],
+                "calculation": {"validations": []},
+            },
+            "loyalty": {"bonusAvailable": None},
+        },
+    }
+
+
+class _CartPromosClient(FakeClient):
+    """Like FakeClient, but silpo_get_similar_products responses vary by the
+    requested slug -- the shared FakeClient only keys by tool name, which
+    can't distinguish per-item promo lookups in the same run."""
+
+    def __init__(self, responses, similar_by_slug):
+        super().__init__(responses)
+        self.similar_by_slug = similar_by_slug
+
+    def call(self, tool, args=None):
+        self.calls.append((tool, args))
+        if tool == "silpo_get_similar_products":
+            return self.similar_by_slug.get(args["slug"], {"success": True, "products": []})
+        return self.responses.get(tool)
+
+
+_MUTATING_TOOLS = {
+    "silpo_add_or_update_cart_products",
+    "silpo_remove_cart_products",
+    "silpo_clear_shopping_cart",
+    "silpo_update_shopping_cart",
+}
+
+
+def test_cart_promos_shows_ranked_discounted_alternatives_per_item(capsys):
+    client = _CartPromosClient(
+        _cart_with_products(
+            {
+                "productId": "milk-1", "companyId": "c1", "branchId": "b1",
+                "slug": "milk-2-5", "name": "Milk 2.5%", "quantity": 1, "price": 45.0,
+            },
+            {
+                "productId": "bread-1", "companyId": "c1", "branchId": "b1",
+                "slug": "bread-white", "name": "White Bread", "quantity": 1, "price": 30.0,
+            },
+        ),
+        similar_by_slug={
+            "milk-2-5": {
+                "success": True,
+                "products": [
+                    {"id": "milk-cheap", "name": "Milk 3.2% promo", "slug": "milk-3-2", "price": 38.0, "oldPrice": 50.0},
+                    {"id": "milk-bag", "name": "Пакет-майка", "slug": "bag", "price": 1.0, "oldPrice": 2.0},
+                ],
+            },
+            "bread-white": {"success": True, "products": []},
+        },
+    )
+
+    exit_code = main(["cart", "promos"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Milk 2.5%" in out
+    assert "Milk 3.2% promo" in out
+    assert "38.0" in out and "50.0" in out
+    assert "Пакет" not in out
+    assert "White Bread" in out
+    assert "no discounted alternatives" in out.lower()
+    assert not any(call[0] in _MUTATING_TOOLS for call in client.calls)
+
+
+def test_cart_promos_on_empty_cart_reports_cleanly_without_error(capsys):
+    client = _CartPromosClient(_cart_with_products(), similar_by_slug={})
+
+    exit_code = main(["cart", "promos"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "empty" in out.lower()
+    assert all(call[0] != "silpo_get_similar_products" for call in client.calls)
     assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)

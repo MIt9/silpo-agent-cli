@@ -28,6 +28,7 @@ from silpo_agent.delivery_settings import run_delivery_settings
 from silpo_agent.favorites_deals import list_favorites_deals
 from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
+from silpo_agent.promo_finder import find_promo_alternatives
 from silpo_agent.promo_optimizer import optimize_promos
 from silpo_agent.substitution_resolver import resolve_substitutions
 
@@ -129,6 +130,31 @@ def _run_favorites_deals(client, log_store, input_fn, print_fn) -> int:
     return 0
 
 
+def _run_cart_promos(client, log_store, input_fn, print_fn) -> int:
+    """`cart promos` (issue #28): read-only -- for every item currently in
+    the cart, shows real promo alternatives via the Similar-Products Promo
+    Finder (promo_finder.py). Never calls a cart-mutating tool."""
+    cart_context = resolve_cart_context(client, input_fn=input_fn, log_store=log_store, print_fn=print_fn)
+    if not cart_context.products:
+        print_fn("Your cart is empty.")
+        return 0
+
+    for item in cart_context.products:
+        name = item.get("name") or item.get("productId") or "?"
+        slug = item.get("slug")
+        print_fn(f"{name}:")
+        candidates = find_promo_alternatives(client, cart_context, slug) if slug else []
+        if not candidates:
+            print_fn("  no discounted alternatives found.")
+            continue
+        for candidate in candidates:
+            print_fn(
+                f"  - {candidate.name}: {candidate.price:.2f} (was {candidate.old_price:.2f}, "
+                f"-{candidate.discount:.2f})"
+            )
+    return 0
+
+
 _TOP_LEVEL_EPILOG = """\
 First run triggers a one-time browser login (OAuth2.1+PKCE against
 mcp.silpo.ua); the token is cached in your OS keyring afterward, so
@@ -141,6 +167,7 @@ commands:
   clear-context   wipe your local reorder history and substitution memory
   coupons         list your active loyalty coupons (read-only)
   favorites-deals list your favorited products currently on discount (read-only)
+  cart promos     show real promo alternatives for every item in your cart (read-only)
 
 run 'silpo-agent reorder --help' for reorder's flags and examples.
 """
@@ -289,12 +316,22 @@ def main(
         "Read-only -- no matching/heuristic, since it's already your own explicit list.",
     )
 
-    subparsers.add_parser(
+    cart_parser = subparsers.add_parser(
         "cart",
         help="Show your current real cart: items, payable total, bonus balance (read-only)",
         description="Show the current real Silpo cart: items (name/quantity/price/stock), the amount actually "
         "payable (totalAfterDiscounts, never the pre-discount total), any cart validations (stock/timeslot "
-        "problems), and your loyalty bonus balance. Read-only -- makes no changes to your cart.",
+        "problems), and your loyalty bonus balance. Read-only -- makes no changes to your cart. Run with no "
+        "subcommand for this view; `cart promos` additionally shows real promo alternatives for every item.",
+    )
+    cart_subparsers = cart_parser.add_subparsers(dest="cart_command")
+    cart_subparsers.add_parser(
+        "promos",
+        help="Show real promo alternatives for every item currently in your cart (read-only)",
+        description="For each item currently in your cart, shows genuinely discounted similar products "
+        "(Silpo's own similarity engine, not a name/category guess), ranked by discount size. Purely "
+        "informational -- never swaps or modifies anything in your cart. An item with no discounted "
+        "alternatives is reported as such, not as an error.",
     )
 
     args = parser.parse_args(argv)
@@ -326,6 +363,8 @@ def main(
         return _run_favorites_deals(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     if args.command == "cart":
+        if args.cart_command == "promos":
+            return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
         return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     return 0
