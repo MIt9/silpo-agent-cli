@@ -732,7 +732,13 @@ def test_clear_context_confirm_wipes_runs_and_substitutions(capsys, tmp_path):
     log_store.append_run({"timestamp": "t", "items_added": ["milk"], "substitutions": {}, "address": "A", "total": 10})
     log_store.set_substitution("milk-1l", "milk-1l-oat")
 
-    exit_code = main(["clear-context"], log_store=log_store, input_fn=lambda prompt="": "y", print_fn=lambda *a: None)
+    exit_code = main(
+        ["clear-context"],
+        log_store=log_store,
+        token_store=FakeTokenStore(),
+        input_fn=lambda prompt="": "y",
+        print_fn=lambda *a: None,
+    )
 
     assert exit_code == 0
     assert log_store.read_history() == []
@@ -755,7 +761,13 @@ def test_clear_context_decline_leaves_data_untouched(tmp_path):
 def test_clear_context_on_empty_store_does_not_error(tmp_path):
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
 
-    exit_code = main(["clear-context"], log_store=log_store, input_fn=lambda prompt="": "y", print_fn=lambda *a: None)
+    exit_code = main(
+        ["clear-context"],
+        log_store=log_store,
+        token_store=FakeTokenStore(),
+        input_fn=lambda prompt="": "y",
+        print_fn=lambda *a: None,
+    )
 
     assert exit_code == 0
     assert log_store.read_history() == []
@@ -765,7 +777,14 @@ def test_clear_context_makes_no_mcp_calls(tmp_path):
     client = FakeClient({})
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
 
-    main(["clear-context"], client=client, log_store=log_store, input_fn=lambda prompt="": "y", print_fn=lambda *a: None)
+    main(
+        ["clear-context"],
+        client=client,
+        log_store=log_store,
+        token_store=FakeTokenStore(),
+        input_fn=lambda prompt="": "y",
+        print_fn=lambda *a: None,
+    )
 
     assert client.calls == []
 
