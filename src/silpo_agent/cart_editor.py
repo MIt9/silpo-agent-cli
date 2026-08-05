@@ -148,7 +148,6 @@ def _add_call(client, cart_context: CartContext, product_id: str, company_id, br
                     "branchId": branch_id,
                     "quantity": quantity,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },

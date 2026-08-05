@@ -108,6 +108,9 @@ def write_cart(
             print_fn("Aborted: cart left unchanged.")
             return CartReport(items_added=[], total=0.0, aborted=True)
 
+        existing_ids = {p.get("productId") for p in cart_context.products}
+        purchasable_items = [item for item in purchasable_items if item.product_id not in existing_ids]
+
     items_to_add = purchasable_items
     trimmed_items: list[TypicalItem] = []
     if budget is not None:
@@ -128,7 +131,6 @@ def write_cart(
                     "branchId": item.branch_id or cart_context.branch_id,
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
                 for item in items_to_add
             ],

@@ -46,7 +46,6 @@ def test_adds_typical_items_and_reports_total():
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 },
                 {
                     "productId": "bread",
@@ -54,7 +53,6 @@ def test_adds_typical_items_and_reports_total():
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 },
             ],
         },
@@ -136,6 +134,26 @@ def test_non_empty_cart_aborts_cleanly_on_decline():
     assert report.items_added == []
     assert report.total == 0.0
     assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_items_already_in_cart_are_not_re_added():
+    """A rerun of reorder must not double quantities: a typical item whose
+    productId already appears in CartContext.products (left over from a
+    prior confirmed run) should be skipped, not re-sent with addQuantity."""
+    context = empty_context(
+        products=[{"productId": "milk", "companyId": "c1", "branchId": "b1", "name": "Milk"}]
+    )
+    client = FakeMCPClient()
+    items = [
+        TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0, company_id="c1", branch_id="b1"),
+        TypicalItem(product_id="bread", frequency=0.75, last_known_price=30.0, company_id="c1", branch_id="b1"),
+    ]
+
+    report = write_cart(client, items, context, input_fn=lambda prompt="": "y")
+
+    assert report.items_added == [("bread", 30.0)]
+    added_call = next(call for call in client.calls if call[0] == "silpo_add_or_update_cart_products")
+    assert [p["productId"] for p in added_call[1]["products"]] == ["bread"]
 
 
 def test_budget_trims_lowest_priority_items_to_fit():

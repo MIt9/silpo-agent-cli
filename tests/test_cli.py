@@ -119,7 +119,6 @@ def test_reorder_fills_cart_and_prints_report(capsys, monkeypatch, tmp_path):
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },
@@ -194,7 +193,6 @@ def test_reorder_no_shipments_cart_reuses_address_without_second_prompt(capsys, 
                     "branchId": "fallback-b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },
@@ -276,7 +274,6 @@ def test_reorder_pipeline_runs_substitution_resolver_between_aggregator_and_cart
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },
@@ -351,7 +348,6 @@ def test_reorder_reports_substitution_when_auto_applied(capsys, monkeypatch, tmp
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },
@@ -467,7 +463,6 @@ def test_reorder_non_empty_cart_warns_and_proceeds_on_confirm(capsys, monkeypatc
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },
@@ -524,7 +519,6 @@ def test_reorder_budget_trims_lowest_priority_items_and_reports_them(capsys, mon
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 },
                 {
                     "productId": "bread",
@@ -532,7 +526,6 @@ def test_reorder_budget_trims_lowest_priority_items_and_reports_them(capsys, mon
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 },
             ],
         },
@@ -624,7 +617,6 @@ def test_reorder_without_optimize_flag_makes_zero_promo_related_calls(capsys, mo
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },
@@ -668,7 +660,6 @@ def test_reorder_optimize_promos_applies_available_bonus(capsys, monkeypatch, tm
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },

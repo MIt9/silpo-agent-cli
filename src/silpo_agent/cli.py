@@ -91,6 +91,7 @@ def _run_reorder(
     for product_id, price in report.items_added:
         print(f"  - {product_id}: {price:.2f}")
     print(f"Total: {report.total:.2f}")
+    print("Check your cart: https://silpo.ua/basket")
     return 0
 
 

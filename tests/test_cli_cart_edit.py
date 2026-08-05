@@ -82,7 +82,6 @@ def test_cart_edit_interactive_happy_path_swaps_item(capsys, tmp_path):
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },
@@ -303,7 +302,6 @@ def test_cart_edit_interactive_promo_browse_path_swaps_item(capsys, tmp_path):
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },
@@ -354,7 +352,6 @@ def test_cart_edit_interactive_promo_browse_no_candidates_falls_back_to_free_tex
                     "branchId": "b1",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },

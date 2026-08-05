@@ -117,7 +117,6 @@ def test_swap_cart_item_removes_old_and_adds_new():
                     "branchId": "b2",
                     "quantity": 1,
                     "addQuantity": True,
-                    "comment": None,
                 }
             ],
         },
