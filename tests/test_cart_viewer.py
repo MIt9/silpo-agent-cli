@@ -58,3 +58,19 @@ def test_cart_with_validations_shows_them_without_blocking():
     # Non-blocking: items and payable total still render alongside the validations.
     assert "Milk 1L" in text
     assert "Payable total: 49.90" in text
+
+
+def test_missing_product_and_validation_fields_render_as_unknown_not_literal_none():
+    """A real response with a gap in one field (missing quantity/price/stock
+    on a product, or missing level/message on a validation) must not render
+    the Python literal "None" -- fall back to "?" instead."""
+    products = [{"productId": "p1", "name": "Milk 1L"}]  # no quantity/price/stock
+    validations = [{"type": "timeslot", "context": []}]  # no level/message
+    context = _context(products=products, validations=validations)
+
+    lines = format_cart(context)
+    text = "\n".join(lines)
+
+    assert "None" not in text
+    assert "x? @ ? (stock: ?)" in text
+    assert "[?] ?" in text

@@ -13,24 +13,38 @@ ticket; CartContext previously exposed no total at all).
 from silpo_agent.cart_context import CartContext
 
 
+def _or_unknown(value):
+    """"?" for a missing/None field instead of rendering the literal string
+    "None" -- a real response with a gap in one field shouldn't make the
+    whole line look broken."""
+    return "?" if value is None else value
+
+
 def format_cart(context: CartContext) -> list[str]:
     lines: list[str] = []
 
+    # A cart with only zero-quantity line items (if the live API ever
+    # returns that) is treated as non-empty here -- context.products is
+    # non-empty, so it's listed with "x0" rather than folded into the
+    # "empty cart" message. Not special-cased: an edge case that hasn't
+    # been observed live, and "x0" is still an accurate, non-crashing render.
     if not context.products:
         lines.append("Your cart is empty.")
     else:
         lines.append(f"Cart ({len(context.products)} item(s)):")
         for product in context.products:
             name = product.get("name") or product.get("productId") or "?"
-            quantity = product.get("quantity")
-            price = product.get("price")
-            stock = product.get("stock")
+            quantity = _or_unknown(product.get("quantity"))
+            price = _or_unknown(product.get("price"))
+            stock = _or_unknown(product.get("stock"))
             lines.append(f"  - {name} x{quantity} @ {price} (stock: {stock})")
 
     if context.validations:
         lines.append("Validations:")
         for validation in context.validations:
-            lines.append(f"  [{validation.get('level')}] {validation.get('message')}")
+            level = _or_unknown(validation.get("level"))
+            message = _or_unknown(validation.get("message"))
+            lines.append(f"  [{level}] {message}")
 
     if context.total_after_discounts is not None:
         lines.append(f"Payable total: {context.total_after_discounts:.2f}")

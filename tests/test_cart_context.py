@@ -63,6 +63,10 @@ def cart_response(cart, loyalty=None):
 def full_cart(branch_id="b1", company_id="c1", delivery_type="DeliveryHome",
               timeslot_start="2026-08-04T10:00:00", timeslot_end="2026-08-04T12:00:00",
               validations=None, products=None, total_after_discounts=166.7):
+    # total_after_discounts defaults to a real value (issue #27) for every
+    # caller of this shared fixture, not just the total_after_discounts
+    # test -- confirmed safe: no existing test in this module asserts the
+    # field is absent/None.
     return {
         "id": "cart-1",
         "deliveryType": delivery_type,
