@@ -352,6 +352,39 @@ def test_no_cart_context_yet_skips_lookups_and_reports_unavailable_without_crash
     assert client.calls == []
 
 
+def test_no_company_id_still_checks_availability_but_skips_replacements():
+    """Issue #29's address-resolver fallback path can legitimately produce a
+    CartContext with a real branch_id but no company_id -- the real
+    silpo_get_available_delivery_types response never carries a companyId
+    (see cart_context.py). silpo_find_products_batch doesn't need companyId
+    at all, so availability checking must still work; only the
+    companyId-requiring silpo_get_replacements call should be skipped."""
+    partial_context = CartContext(
+        shopping_cart_id="cart-2",
+        branch_id="branch-1",
+        company_id=None,
+        delivery_type="DeliveryHome",
+        timeslot_start="2026-08-04T10:00:00Z",
+        timeslot_end="2026-08-04T11:00:00Z",
+        validations=[],
+    )
+    available_item = TypicalItem(product_id="bread", frequency=1.0, last_known_price=30.0)
+    unavailable_item = TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0)
+    client = FakeClient(
+        {"silpo_find_products_batch": _available_batch_response(["bread", "milk"], unavailable_ids=["milk"])}
+    )
+    log_store = FakeLogStore()
+
+    result = resolve_substitutions(
+        client, log_store, [available_item, unavailable_item], partial_context, print_fn=lambda *a: None
+    )
+
+    assert result.items == [available_item]
+    assert result.unavailable == ["milk"]
+    assert any(call[0] == "silpo_find_products_batch" for call in client.calls)
+    assert all(call[0] != "silpo_get_replacements" for call in client.calls)
+
+
 def test_availability_check_uses_item_name_as_query_when_present():
     """TypicalItem.name (added in issue #19) is a far better free-text
     search query than a raw product_id/UUID -- used when present, matched

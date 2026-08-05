@@ -138,10 +138,12 @@ def test_reorder_no_shipments_cart_reuses_address_without_second_prompt(capsys, 
     """Issue #29: Cart Context Resolver's no-shipments address fallback must
     NOT prompt the user a second time in reorder's pipeline -- it already
     resolved an address itself via Address Resolver before Cart Context
-    Resolver even runs. This also proves the fallback's real branch/company
-    context reaches the final add-to-cart call (order items below carry no
+    Resolver even runs. This also proves the fallback's real branch context
+    reaches the final add-to-cart call (order items below carry no
     companyId/branchId of their own, so only the fallback context can supply
-    them)."""
+    branch_id -- company_id is never available from this fallback path per
+    the real silpo_get_available_delivery_types response shape, so it stays
+    None all the way through)."""
     orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False}]}]
     client = FakeClient(
         {
@@ -151,9 +153,8 @@ def test_reorder_no_shipments_cart_reuses_address_without_second_prompt(capsys, 
             ],
             "silpo_get_available_delivery_types": {
                 "success": True,
-                "branchId": "fallback-b1",
-                "companyId": "fallback-c1",
-                "deliveryTypes": [{"type": "DeliveryHome", "branchId": "fallback-b1", "companyId": "fallback-c1"}],
+                "summary": "Found 1 delivery options",
+                "options": [{"deliveryType": "DeliveryHome", "branchId": "fallback-b1", "description": "Regular"}],
             },
             "silpo_find_products_batch": _available_batch("milk"),
             "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-2"},
@@ -189,7 +190,7 @@ def test_reorder_no_shipments_cart_reuses_address_without_second_prompt(capsys, 
             "products": [
                 {
                     "productId": "milk",
-                    "companyId": "fallback-c1",
+                    "companyId": None,
                     "branchId": "fallback-b1",
                     "quantity": 1,
                     "addQuantity": True,

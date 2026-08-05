@@ -43,11 +43,16 @@ replacement tools" section):
   guess, not a verified shape -- see docs/mcp_schema.md. Candidate id lookups
   read `"id"` first, falling back to `"productId"`, for the same reason.
 
-If `cart_context.branch_id`/`.company_id` are `None` (no cart resolved yet --
+If `cart_context.branch_id` is `None` (no cart resolved yet --
 `resolve_cart_context` returns an all-None `CartContext` on a first-ever run
 or cleared cart, see cart_context.py), both MCP calls are skipped entirely
 and every item is reported unavailable rather than sending `None` fields to
-the real API.
+the real API. If `branch_id` is present but `company_id` is not (the
+address-resolver fallback, issue #29, never has a `company_id` to give --
+see cart_context.py), availability checking still runs (`silpo_find_products_batch`
+doesn't take a `companyId` at all), but `silpo_get_replacements` is skipped
+since it requires one -- unavailable items in that case are reported with no
+replacement candidates found, rather than sending `None` as `companyId`.
 """
 
 from dataclasses import dataclass
@@ -194,20 +199,25 @@ def resolve_substitutions(
     input_fn = input_fn or input
     print_fn = print_fn or print
 
-    if not cart_context.branch_id or not cart_context.company_id:
+    if not cart_context.branch_id:
         # No cart context resolved yet (first-ever run, or a cleared cart --
         # resolve_cart_context returns an all-None CartContext in that case,
-        # see cart_context.py). Both silpo_find_products_batch and
-        # silpo_get_replacements require branchId/companyId; sending None
-        # would fail against the real API. Skip both lookups and report every
-        # item unavailable rather than crashing.
+        # see cart_context.py). silpo_find_products_batch requires branchId;
+        # sending None would fail against the real API. Skip both lookups and
+        # report every item unavailable rather than crashing.
         return SubstitutionResult(
             items=[], substitutions=[], unavailable=[item.product_id for item in typical_items]
         )
 
     availability = _check_availability(client, typical_items, cart_context)
     unavailable_items = [item for item in typical_items if not availability.get(item.product_id)]
-    replacements = _fetch_replacements(client, unavailable_items, cart_context)
+    # silpo_get_replacements requires companyId, unlike silpo_find_products_batch
+    # above -- the address-resolver fallback (issue #29) can legitimately
+    # produce a branch_id with no company_id (the real
+    # silpo_get_available_delivery_types response never carries one), so this
+    # lookup is skipped in that case rather than sending a None companyId;
+    # affected items simply have no replacement candidates found.
+    replacements = _fetch_replacements(client, unavailable_items, cart_context) if cart_context.company_id else {}
 
     items: list[TypicalItem] = []
     substitutions: list[tuple[str, str]] = []

@@ -35,9 +35,11 @@ the Address Resolver (`address_resolver.resolve_address`) to get a
 confirmed address, then reads `ResolvedAddress.delivery_types` -- the raw
 `silpo_get_available_delivery_types` response `resolve_address` already
 fetches for that address's coordinates -- to fill in real `branchId`/
-`companyId`/`deliveryType`. `silpo_get_available_delivery_types`'s response
-shape is unconfirmed live (see docs/mcp_schema.md, issue #29); the extractor
-below defensively tries a few plausible shapes rather than assuming one.
+`deliveryType` (`companyId` is never available from this response -- see
+`_branch_context_from_delivery_types`). `silpo_get_available_delivery_types`'s
+real response shape (`{"options": [{"deliveryType", "branchId",
+"description"}]}`) was live-verified in issue #37, after this ticket first
+shipped with a guessed, wrong key name (`"deliveryTypes"`) -- fixed here.
 
 Callers that already resolved an address themselves (`reorder`'s pipeline,
 via `cli.py`) must pass it as `resolved_address=` so this fallback reuses it
@@ -89,26 +91,24 @@ def _empty_context(shopping_cart_id: str | None = None) -> CartContext:
 
 
 def _branch_context_from_delivery_types(response: dict | None) -> tuple[str | None, str | None, str | None]:
-    """Best-effort (branch_id, company_id, delivery_type) extraction from a
-    `silpo_get_available_delivery_types` response. Unconfirmed live shape
-    (see docs/mcp_schema.md, issue #29) -- tries top-level fields first, then
-    the first (or first `available`) entry of a `deliveryTypes` list."""
+    """(branch_id, company_id, delivery_type) extraction from a
+    `silpo_get_available_delivery_types` response. Real, live-verified shape
+    (docs/mcp_schema.md, issue #37): `{"options": [{"deliveryType",
+    "branchId", "description"}]}` -- no `companyId` anywhere in this
+    response, so company_id is always None from this path. Prefers a
+    `DeliveryHome` option, falling back to the first option."""
     if not isinstance(response, dict):
         return None, None, None
 
-    branch_id = response.get("branchId")
-    company_id = response.get("companyId")
-    delivery_type = response.get("deliveryType")
+    options = response.get("options")
+    if not isinstance(options, list) or not options:
+        return None, None, None
 
-    options = response.get("deliveryTypes")
-    if isinstance(options, list) and options:
-        chosen = next((o for o in options if isinstance(o, dict) and o.get("available", True)), options[0])
-        if isinstance(chosen, dict):
-            branch_id = branch_id or chosen.get("branchId")
-            company_id = company_id or chosen.get("companyId")
-            delivery_type = delivery_type or chosen.get("type") or chosen.get("deliveryType")
+    chosen = next((o for o in options if isinstance(o, dict) and o.get("deliveryType") == "DeliveryHome"), options[0])
+    if not isinstance(chosen, dict):
+        return None, None, None
 
-    return branch_id, company_id, delivery_type
+    return chosen.get("branchId"), None, chosen.get("deliveryType")
 
 
 def resolve_cart_context(

@@ -194,9 +194,8 @@ def test_no_shipments_with_preresolved_address_reuses_its_delivery_types():
         longitude=30.52,
         delivery_types={
             "success": True,
-            "branchId": "fallback-b1",
-            "companyId": "fallback-c1",
-            "deliveryTypes": [{"type": "DeliveryHome", "branchId": "fallback-b1", "companyId": "fallback-c1"}],
+            "summary": "Found 1 delivery options",
+            "options": [{"deliveryType": "DeliveryHome", "branchId": "fallback-b1", "description": "Regular"}],
         },
     )
     client = _empty_shipments_cart_client()
@@ -204,7 +203,6 @@ def test_no_shipments_with_preresolved_address_reuses_its_delivery_types():
     context = resolve_cart_context(client, print_fn=lambda *a: None, resolved_address=resolved_address)
 
     assert context.branch_id == "fallback-b1"
-    assert context.company_id == "fallback-c1"
     assert context.delivery_type == "DeliveryHome"
     assert all(
         call[0] not in ("silpo_get_my_delivery_addresses", "silpo_find_address", "silpo_get_available_delivery_types")
@@ -223,9 +221,8 @@ def test_no_shipments_without_preresolved_address_runs_interactive_fallback():
             ),
             "silpo_get_available_delivery_types": {
                 "success": True,
-                "branchId": "b9",
-                "companyId": "c9",
-                "deliveryTypes": [{"type": "DeliveryHome", "branchId": "b9", "companyId": "c9"}],
+                "summary": "Found 1 delivery options",
+                "options": [{"deliveryType": "DeliveryHome", "branchId": "b9", "description": "Regular"}],
             },
         }
     )
@@ -236,7 +233,6 @@ def test_no_shipments_without_preresolved_address_runs_interactive_fallback():
     )
 
     assert context.branch_id == "b9"
-    assert context.company_id == "c9"
     assert context.delivery_type == "DeliveryHome"
     assert ("silpo_get_my_delivery_addresses", None) in client.calls
     assert log_store.runs and log_store.runs[0]["address_id"] == "a1"
