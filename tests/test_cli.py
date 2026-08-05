@@ -1057,6 +1057,46 @@ def test_deals_command_with_no_active_promotions_prints_clean_message(capsys):
     assert all(call[0] != "silpo_get_products" for call in client.calls)
 
 
+def test_deals_category_flag_filters_to_the_matched_category(capsys):
+    responses = _deals_fixture_responses()
+    responses["silpo_get_categories"] = {
+        "success": True,
+        "categories": [{"id": "id-1", "slug": "ovochi-4808", "title": "Овочі"}],
+        "meta": {"total": 1},
+    }
+    responses["silpo_get_products"] = {
+        "success": True,
+        "products": [{"id": "carrot", "slug": "morkva-789561", "name": "Морква", "price": 41.42, "oldPrice": 49.9, "companyId": "c1", "branchId": "b1"}],
+    }
+    client = FakeClient(responses)
+
+    exit_code = main(["deals", "--category", "Овочі"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Морква" in out
+    assert all(call[0] != "silpo_get_promotions" for call in client.calls)
+    products_call = next(c for c in client.calls if c[0] == "silpo_get_products")
+    assert products_call[1]["category"] == "ovochi-4808"
+
+
+def test_deals_category_flag_unmatched_errors_clearly(capsys):
+    responses = _deals_fixture_responses()
+    responses["silpo_get_categories"] = {
+        "success": True,
+        "categories": [{"id": "id-1", "slug": "frukty-4791", "title": "Фрукти"}],
+        "meta": {"total": 1},
+    }
+    client = FakeClient(responses)
+
+    exit_code = main(["deals", "--category", "Неіснуюча категорія"], client=client)
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "Неіснуюча категорія" in out
+    assert all(call[0] != "silpo_get_products" for call in client.calls)
+
+
 def test_delivery_wires_end_to_end_and_exits_zero(capsys, tmp_path):
     client = FakeClient(_delivery_fixture_responses())
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")

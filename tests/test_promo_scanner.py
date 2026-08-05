@@ -1,5 +1,5 @@
 from silpo_agent.cart_context import CartContext
-from silpo_agent.promo_scanner import scan_deals
+from silpo_agent.promo_scanner import CategoryNotFoundError, resolve_category_slug, scan_deals
 
 
 class FakeClient:
@@ -205,6 +205,101 @@ def test_no_active_promotions_returns_empty_without_product_calls():
     deals = scan_deals(client, _context())
 
     assert deals == []
+    assert all(call[0] != "silpo_get_products" for call in client.calls)
+
+
+# --- resolve_category_slug / scan_deals(category=...) ------------------
+
+
+def _categories_page(*slug_titles, total=None):
+    categories = [{"id": f"id-{slug}", "slug": slug, "title": title} for slug, title in slug_titles]
+    return {"success": True, "categories": categories, "meta": {"total": total if total is not None else len(categories)}}
+
+
+def test_resolve_category_slug_exact_match():
+    client = FakeClient(
+        {"silpo_get_categories": _categories_page(("ovochi-4808", "Овочі"), ("frukty-4791", "Фрукти"))}
+    )
+
+    assert resolve_category_slug(client, _context(), "Овочі") == "ovochi-4808"
+
+
+def test_resolve_category_slug_case_insensitive():
+    client = FakeClient({"silpo_get_categories": _categories_page(("ovochi-4808", "Овочі"))})
+
+    assert resolve_category_slug(client, _context(), "овочі") == "ovochi-4808"
+
+
+def test_resolve_category_slug_prefers_exact_over_substring():
+    """"Овочі" must resolve to the exact vegetables category, not the
+    broader "Фрукти, овочі" combined category that also contains the word."""
+    client = FakeClient(
+        {"silpo_get_categories": _categories_page(("frukty-ovochi-4788", "Фрукти, овочі"), ("ovochi-4808", "Овочі"))}
+    )
+
+    assert resolve_category_slug(client, _context(), "Овочі") == "ovochi-4808"
+
+
+def test_resolve_category_slug_falls_back_to_shortest_substring_match():
+    client = FakeClient({"silpo_get_categories": _categories_page(("frukty-ovochi-4788", "Фрукти, овочі"))})
+
+    assert resolve_category_slug(client, _context(), "овоч") == "frukty-ovochi-4788"
+
+
+def test_resolve_category_slug_no_match_returns_none():
+    client = FakeClient({"silpo_get_categories": _categories_page(("frukty-4791", "Фрукти"))})
+
+    assert resolve_category_slug(client, _context(), "Морепродукти") is None
+
+
+def test_resolve_category_slug_paginates_across_the_full_category_list():
+    """1015 real categories, one call maxes out at 1000 -- a match sitting
+    only on page 2 must not be missed."""
+    page1 = [{"id": f"id-{i}", "slug": f"cat-{i}", "title": f"Category {i}"} for i in range(1000)]
+    page2 = [{"id": "id-ovochi", "slug": "ovochi-4808", "title": "Овочі"}]
+
+    def call(tool, args=None):
+        if tool == "silpo_get_categories":
+            if args["offset"] == 0:
+                return {"success": True, "categories": page1, "meta": {"total": 1001}}
+            return {"success": True, "categories": page2, "meta": {"total": 1001}}
+        return {}
+
+    client = FakeClient()
+    client.call = call
+
+    assert resolve_category_slug(client, _context(), "Овочі") == "ovochi-4808"
+
+
+def test_scan_deals_with_category_queries_get_products_directly_by_slug():
+    client = FakeClient(
+        {
+            "silpo_get_categories": _categories_page(("ovochi-4808", "Овочі")),
+            "silpo_get_products": {
+                "success": True,
+                "products": [_product("carrot", price=41.42, old_price=49.9, name="Морква")],
+            },
+        }
+    )
+
+    deals = scan_deals(client, _context(), category="Овочі")
+
+    assert [deal.product_id for deal in deals] == ["carrot"]
+    assert all(call[0] != "silpo_get_promotions" for call in client.calls)
+    products_call = next(c for c in client.calls if c[0] == "silpo_get_products")
+    assert products_call[1]["category"] == "ovochi-4808"
+    assert products_call[1]["mustHavePromotion"] is True
+
+
+def test_scan_deals_unknown_category_raises_without_calling_get_products():
+    client = FakeClient({"silpo_get_categories": _categories_page(("frukty-4791", "Фрукти"))})
+
+    try:
+        scan_deals(client, _context(), category="Неіснуюча категорія")
+        assert False, "expected CategoryNotFoundError"
+    except CategoryNotFoundError as exc:
+        assert "Неіснуюча категорія" in str(exc)
+
     assert all(call[0] != "silpo_get_products" for call in client.calls)
 
 

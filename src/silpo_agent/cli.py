@@ -38,7 +38,7 @@ from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
 from silpo_agent.promo_finder import find_promo_alternatives
 from silpo_agent.promo_optimizer import optimize_promos
-from silpo_agent.promo_scanner import scan_deals
+from silpo_agent.promo_scanner import CategoryNotFoundError, scan_deals
 from silpo_agent.substitution_resolver import resolve_substitutions
 
 
@@ -268,9 +268,13 @@ def _run_cart(client, log_store, input_fn, print_fn) -> int:
     return 0
 
 
-def _run_deals(client, limit, log_store, input_fn, print_fn) -> int:
+def _run_deals(client, limit, log_store, input_fn, print_fn, category=None) -> int:
     cart_context = resolve_cart_context(client, log_store=log_store, input_fn=input_fn, print_fn=print_fn)
-    deals = scan_deals(client, cart_context, limit=limit)
+    try:
+        deals = scan_deals(client, cart_context, limit=limit, category=category)
+    except CategoryNotFoundError as exc:
+        print_fn(f"deals: no category matching {str(exc)!r} found")
+        return 1
     if not deals:
         print_fn("No current deals found.")
         return 0
@@ -604,6 +608,14 @@ def main(
         metavar="N",
         help="How many top deals to show, sorted by discount percentage descending. Default: 10.",
     )
+    deals_parser.add_argument(
+        "--category",
+        default=None,
+        metavar="NAME",
+        help="Only show deals in this category, e.g. \"Овочі\". Matched by real category title "
+        "(exact match preferred, else the shortest title containing it) -- errors clearly if nothing matches, "
+        "rather than silently showing zero deals.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -646,7 +658,9 @@ def main(
         return _run_favorites_deals(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     if args.command == "deals":
-        return _run_deals(client or MCPClient(), args.limit, log_store or ReorderLogStore(), input_fn, print_fn)
+        return _run_deals(
+            client or MCPClient(), args.limit, log_store or ReorderLogStore(), input_fn, print_fn, args.category
+        )
 
     return 0
 
