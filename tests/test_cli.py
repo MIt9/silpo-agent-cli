@@ -787,3 +787,69 @@ def test_coupons_command_with_no_active_coupons_prints_clean_message(capsys):
     assert exit_code == 0
     assert "no active coupons" in out.lower()
     assert all(call[0] != "silpo_get_coupon_details" for call in client.calls)
+
+
+def _delivery_fixture_responses():
+    """Full fixture set for a happy-path `delivery` run: saved address,
+    cart context (address/shipments template), delivery-type options
+    (real shape live-verified 2026-08-05: {"options": [...]}, not
+    "deliveryTypes"), and one available timeslot."""
+    return {
+        "silpo_get_my_delivery_addresses": [
+            {"id": "a1", "city": "Вінниця", "street": "Варшавська вулиця", "building": "27",
+             "apartment": None, "floor": None, "entrance": None, "latitude": 49.24, "longitude": 28.48,
+             "comment": None},
+        ],
+        "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+        "silpo_get_shopping_cart_by_id": {
+            "success": True,
+            "cart": {
+                "deliveryType": "DeliveryHome",
+                "timeslot": {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"},
+                "address": {"addressType": "flat", "latitude": "49.24", "longitude": "28.48", "city": "Вінниця"},
+                "shipments": [{"id": "ship-1", "companyId": "c1", "branchId": "old-branch", "products": []}],
+                "calculation": {"validations": []},
+            },
+            "loyalty": {},
+        },
+        "silpo_get_available_delivery_types": {
+            "success": True,
+            "summary": "Found 1 delivery options",
+            "options": [{"deliveryType": "DeliveryHome", "branchId": "new-branch", "description": "Regular delivery"}],
+        },
+        "silpo_get_time_slots": {
+            "success": True,
+            "summary": "Found 1 slots",
+            "slots": [{"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00", "available": True}],
+            "meta": {"total": 1},
+        },
+        "silpo_update_shopping_cart": {"success": True},
+    }
+
+
+def test_delivery_wires_end_to_end_and_exits_zero(capsys, tmp_path):
+    client = FakeClient(_delivery_fixture_responses())
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    answers = iter(["y", "1", "1"])
+
+    exit_code = main(
+        ["delivery"], client=client, log_store=log_store,
+        input_fn=lambda prompt="": next(answers), print_fn=lambda *a: None,
+    )
+
+    assert exit_code == 0
+    assert any(call[0] == "silpo_update_shopping_cart" for call in client.calls)
+
+
+def test_delivery_invalid_selection_exits_nonzero_without_update_call(tmp_path):
+    client = FakeClient(_delivery_fixture_responses())
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    answers = iter(["y", "99"])  # 99 is out of range for the single delivery-type option
+
+    exit_code = main(
+        ["delivery"], client=client, log_store=log_store,
+        input_fn=lambda prompt="": next(answers), print_fn=lambda *a: None,
+    )
+
+    assert exit_code == 1
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
