@@ -1,3 +1,4 @@
+from silpo_agent.auth import MCPError
 from silpo_agent.cart_context import CartContext
 from silpo_agent.cart_editor import CartEditError, search_replacement_candidates, swap_cart_item
 
@@ -9,7 +10,8 @@ class FakeClient:
 
     def call(self, tool, args=None):
         self.calls.append((tool, args))
-        return self._responses.get(tool)
+        response = self._responses.get(tool)
+        return response(args) if callable(response) else response
 
 
 def cart_context(products=None, shopping_cart_id="cart-1", branch_id="b1", company_id="c1"):
@@ -106,6 +108,67 @@ def test_swap_cart_item_old_id_not_in_cart_raises_and_makes_no_calls():
         assert "milk" in str(exc)
 
     assert client.calls == []
+
+
+def test_swap_cart_item_add_failure_after_remove_rolls_back_and_raises_clear_error():
+    """If silpo_remove_cart_products succeeds but the following
+    silpo_add_or_update_cart_products fails, the old item must not simply
+    vanish -- swap_cart_item attempts a best-effort re-add of the old item
+    (same productId/companyId/branchId/quantity just removed) before
+    raising, and the error message says what happened."""
+    context = cart_context(products=[{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 2}])
+
+    def add_response(args):
+        if args["products"][0]["productId"] == "oat-milk":
+            raise MCPError("add failed")
+        return {"success": True}
+
+    client = FakeClient(
+        {"silpo_remove_cart_products": {"success": True}, "silpo_add_or_update_cart_products": add_response}
+    )
+    new_product = {"id": "oat-milk", "companyId": "c2", "branchId": "b2", "price": 55.0}
+
+    try:
+        swap_cart_item(client, context, "milk", new_product)
+        assert False, "expected CartEditError"
+    except CartEditError as exc:
+        message = str(exc).lower()
+        assert "milk" in message
+        assert "restored" in message or "restore" in message
+
+    add_calls = [c for c in client.calls if c[0] == "silpo_add_or_update_cart_products"]
+    assert len(add_calls) == 2
+    assert add_calls[0][1]["products"][0]["productId"] == "oat-milk"
+    # rollback re-adds the OLD item with its original line's context/quantity
+    rollback_product = add_calls[1][1]["products"][0]
+    assert rollback_product["productId"] == "milk"
+    assert rollback_product["companyId"] == "c1"
+    assert rollback_product["branchId"] == "b1"
+    assert rollback_product["quantity"] == 2
+
+
+def test_swap_cart_item_add_and_rollback_both_fail_reports_inconsistent_state():
+    context = cart_context(products=[{"productId": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1}])
+
+    def add_response(args):
+        raise MCPError("add failed")
+
+    client = FakeClient(
+        {"silpo_remove_cart_products": {"success": True}, "silpo_add_or_update_cart_products": add_response}
+    )
+    new_product = {"id": "oat-milk", "companyId": "c2", "branchId": "b2", "price": 55.0}
+
+    try:
+        swap_cart_item(client, context, "milk", new_product)
+        assert False, "expected CartEditError"
+    except CartEditError as exc:
+        message = str(exc).lower()
+        assert "milk" in message
+        assert "manually" in message or "may be missing" in message
+
+    # rollback was still attempted even though it too failed
+    add_calls = [c for c in client.calls if c[0] == "silpo_add_or_update_cart_products"]
+    assert len(add_calls) == 2
 
 
 def test_swap_cart_item_new_product_without_id_raises_and_makes_no_calls():
