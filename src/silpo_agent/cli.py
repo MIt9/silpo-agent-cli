@@ -21,6 +21,7 @@ import sys
 from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient
 from silpo_agent.cart_context import resolve_cart_context
+from silpo_agent.cart_editor import CartEditError, search_replacement_candidates, swap_cart_item
 from silpo_agent.cart_viewer import format_cart
 from silpo_agent.cart_writer import write_cart
 from silpo_agent.coupons_lister import list_coupons
@@ -89,6 +90,93 @@ def _run_reorder(
 def _run_delivery(client, log_store, input_fn, print_fn) -> int:
     result = run_delivery_settings(client, log_store, input_fn=input_fn, print_fn=print_fn)
     return 0 if result.applied else 1
+
+
+def _resolve_new_product(client, cart_context, new_product_id, print_fn):
+    """Resolves `new_product_id` to a full product record via the same
+    free-text search `search_replacement_candidates` uses for the
+    interactive flow -- there's no per-id product lookup tool, so the id
+    itself is used as the search query and matched by exact id in the
+    results (see cart_editor.py's module docstring)."""
+    candidates = search_replacement_candidates(client, cart_context, new_product_id)
+    match = next((c for c in candidates if (c.get("id") or c.get("productId")) == new_product_id), None)
+    if match is None:
+        print_fn(f"cart edit: replacement product {new_product_id!r} not found")
+    return match
+
+
+def _run_cart_edit_replace(client, cart_context, old_id, new_id, print_fn) -> int:
+    new_product = _resolve_new_product(client, cart_context, new_id, print_fn)
+    if new_product is None:
+        return 1
+    try:
+        result = swap_cart_item(client, cart_context, old_id, new_product)
+    except CartEditError as exc:
+        print_fn(f"cart edit: {exc}")
+        return 1
+    print_fn(f"Replaced {result.removed_product_id} with {result.added_product_id} ({result.added_price:.2f})")
+    return 0
+
+
+def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
+    if not cart_context.products:
+        print_fn("Your cart is empty; nothing to edit.")
+        return 0
+
+    print_fn("Current cart items:")
+    for i, product in enumerate(cart_context.products, start=1):
+        print_fn(f"{i}. {product.get('name') or product.get('productId')}")
+    choice = input_fn("Pick an item to replace: ").strip()
+    idx = int(choice) if choice.isdigit() else None
+    if not idx or not (1 <= idx <= len(cart_context.products)):
+        print_fn(f"No item numbered {choice!r}.")
+        return 1
+    old_product = cart_context.products[idx - 1]
+    old_id = old_product.get("productId")
+
+    query = input_fn("Search for a replacement: ").strip()
+    candidates = search_replacement_candidates(client, cart_context, query) if query else []
+    if not candidates:
+        print_fn(f"cart edit: no results for {query!r}")
+        return 1
+
+    print_fn("Candidates:")
+    for i, candidate in enumerate(candidates, start=1):
+        print_fn(f"{i}. {candidate.get('name')} ({candidate.get('price')})")
+    pick = input_fn("Pick a replacement: ").strip()
+    pick_idx = int(pick) if pick.isdigit() else None
+    if not pick_idx or not (1 <= pick_idx <= len(candidates)):
+        print_fn(f"No candidate numbered {pick!r}.")
+        return 1
+    chosen = candidates[pick_idx - 1]
+
+    old_label = old_product.get("name") or old_id
+    new_label = chosen.get("name") or chosen.get("id")
+    confirm = input_fn(f"Replace {old_label} with {new_label}? [y/N] ").strip().lower()
+    if confirm not in ("y", "yes"):
+        print_fn("Aborted: cart left unchanged.")
+        return 0
+
+    try:
+        result = swap_cart_item(client, cart_context, old_id, chosen)
+    except CartEditError as exc:
+        print_fn(f"cart edit: {exc}")
+        return 1
+    print_fn(f"Replaced {result.removed_product_id} with {result.added_product_id} ({result.added_price:.2f})")
+    return 0
+
+
+def _run_cart_edit(client, log_store, input_fn, print_fn, replace: list[str] | None) -> int:
+    cart_context = resolve_cart_context(client, input_fn=input_fn, print_fn=print_fn, log_store=log_store)
+    if not cart_context.shopping_cart_id:
+        print_fn("cart edit: no cart resolved; nothing to edit")
+        return 1
+
+    if replace is not None:
+        old_id, new_id = replace
+        return _run_cart_edit_replace(client, cart_context, old_id, new_id, print_fn)
+
+    return _run_cart_edit_interactive(client, cart_context, input_fn, print_fn)
 
 
 def _run_clear_context(log_store, input_fn, print_fn) -> int:
@@ -162,12 +250,13 @@ later runs don't re-prompt until it expires.
 
 commands:
   cart            show your current real cart: items, payable total, bonus balance (read-only)
+  cart edit       manually replace one cart item with another
+  cart promos     show real promo alternatives for every item in your cart (read-only)
   reorder         rebuild your cart from your typical (frequently-bought) items
   delivery        explicitly set your delivery address, delivery type, and timeslot
   clear-context   wipe your local reorder history and substitution memory
   coupons         list your active loyalty coupons (read-only)
   favorites-deals list your favorited products currently on discount (read-only)
-  cart promos     show real promo alternatives for every item in your cart (read-only)
 
 run 'silpo-agent reorder --help' for reorder's flags and examples.
 """
@@ -196,6 +285,32 @@ what it does, in order:
 
 interactive only -- no flags. an invalid or out-of-range choice at any step
 aborts cleanly without applying anything.
+"""
+
+_CART_EDIT_EPILOG = """\
+what it does, in order (interactive, no flags):
+  1. lists the items currently in your real cart, numbered
+  2. asks which one to replace
+  3. asks for free-text search terms, shows matching candidates (plastic
+     bags are never shown as candidates)
+  4. asks you to confirm the swap
+  5. removes the old item and adds the new one (silpo_remove_cart_products
+     then silpo_add_or_update_cart_products -- there's no in-place "update
+     this line" call) -- the old item is never removed until the new one is
+     confirmed to exist, so a failed/declined swap always leaves the cart
+     untouched
+
+non-interactive scripting:
+  silpo-agent cart edit --replace <old-product-id> <new-product-id>
+performs the same swap with zero prompts. <new-product-id> is resolved via
+the same free-text product search as the interactive flow, using the id
+itself as the search query and matching a candidate by exact id -- there is
+no per-id product lookup tool in this API, so it must be a real, currently
+searchable product id (an id copied from a search result, another cart, or
+a past order -- not an arbitrary/invented string).
+
+an old id not actually in your cart, or a new id/search that resolves to
+nothing, errors clearly and leaves the cart untouched.
 """
 
 _REORDER_EPILOG = """\
@@ -283,6 +398,41 @@ def main(
         "'promos' applies any available loyalty bonuses to the cart before checkout.",
     )
 
+    cart_parser = subparsers.add_parser(
+        "cart",
+        help="Show your current real cart (read-only); `cart edit`/`cart promos` for more",
+        description="Show the current real Silpo cart: items (name/quantity/price/stock), the amount actually "
+        "payable (totalAfterDiscounts, never the pre-discount total), any cart validations (stock/timeslot "
+        "problems), and your loyalty bonus balance -- the default when no further subcommand is given. "
+        "`cart edit` manually replaces one item with another; `cart promos` shows real promo alternatives "
+        "for every item.",
+    )
+    cart_subparsers = cart_parser.add_subparsers(dest="cart_command")
+    edit_parser = cart_subparsers.add_parser(
+        "edit",
+        help="Replace one cart item with another",
+        description="Replace one item in your real cart with another -- interactively (list current items, "
+        "free-text search a replacement, confirm) or non-interactively via --replace for scripting.",
+        epilog=_CART_EDIT_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    edit_parser.add_argument(
+        "--replace",
+        nargs=2,
+        metavar=("OLD_PRODUCT_ID", "NEW_PRODUCT_ID"),
+        default=None,
+        help="Non-interactive: replace OLD_PRODUCT_ID with NEW_PRODUCT_ID, zero prompts. NEW_PRODUCT_ID must be "
+        "a real, currently searchable product id (resolved via free-text search on the id itself).",
+    )
+    cart_subparsers.add_parser(
+        "promos",
+        help="Show real promo alternatives for every item currently in your cart (read-only)",
+        description="For each item currently in your cart, shows genuinely discounted similar products "
+        "(Silpo's own similarity engine, not a name/category guess), ranked by discount size. Purely "
+        "informational -- never swaps or modifies anything in your cart. An item with no discounted "
+        "alternatives is reported as such, not as an error.",
+    )
+
     subparsers.add_parser(
         "delivery",
         help="Explicitly set delivery address, delivery type, and timeslot",
@@ -316,24 +466,6 @@ def main(
         "Read-only -- no matching/heuristic, since it's already your own explicit list.",
     )
 
-    cart_parser = subparsers.add_parser(
-        "cart",
-        help="Show your current real cart: items, payable total, bonus balance (read-only)",
-        description="Show the current real Silpo cart: items (name/quantity/price/stock), the amount actually "
-        "payable (totalAfterDiscounts, never the pre-discount total), any cart validations (stock/timeslot "
-        "problems), and your loyalty bonus balance. Read-only -- makes no changes to your cart. Run with no "
-        "subcommand for this view; `cart promos` additionally shows real promo alternatives for every item.",
-    )
-    cart_subparsers = cart_parser.add_subparsers(dest="cart_command")
-    cart_subparsers.add_parser(
-        "promos",
-        help="Show real promo alternatives for every item currently in your cart (read-only)",
-        description="For each item currently in your cart, shows genuinely discounted similar products "
-        "(Silpo's own similarity engine, not a name/category guess), ranked by discount size. Purely "
-        "informational -- never swaps or modifies anything in your cart. An item with no discounted "
-        "alternatives is reported as such, not as an error.",
-    )
-
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -350,6 +482,18 @@ def main(
             optimize=args.optimize,
         )
 
+    if args.command == "cart":
+        if args.cart_command == "edit":
+            return _run_cart_edit(
+                client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn, args.replace
+            )
+        if args.cart_command == "promos":
+            return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+        if args.cart_command is None:
+            return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+        cart_parser.print_help()
+        return 0
+
     if args.command == "delivery":
         return _run_delivery(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
@@ -361,11 +505,6 @@ def main(
 
     if args.command == "favorites-deals":
         return _run_favorites_deals(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
-
-    if args.command == "cart":
-        if args.cart_command == "promos":
-            return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
-        return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     return 0
 
