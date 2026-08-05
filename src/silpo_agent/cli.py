@@ -194,7 +194,7 @@ def _run_cart_edit_interactive(client, cart_context, input_fn, print_fn) -> int:
         return 1
 
     old_label = old_product.get("name") or old_slug
-    new_label = chosen.get("name") or chosen.get("slug")
+    new_label = chosen.get("name") or chosen.get("slug") or chosen.get("id")
     confirm = input_fn(f"Replace {old_label} with {new_label}? [y/N] ").strip().lower()
     if confirm not in ("y", "yes"):
         print_fn("Aborted: cart left unchanged.")
