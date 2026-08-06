@@ -9,11 +9,15 @@ Source of truth is the CLI's own `--help` -- this skill mirrors it. If
 flags look off from what's written here, re-run `--help` and trust that,
 not this file.
 
-Run from this repo's root (wherever it's cloned):
+Installed from PyPI (`pipx install silpo-agent-cli` / `uvx --from
+silpo-agent-cli silpo-agent`), so it's just:
 
 ```bash
-uv run silpo-agent <command> ...
+silpo-agent <command> ...
 ```
+
+Working from a clone of this repo instead (dev mode)? Use `uv run
+silpo-agent <command> ...` instead.
 
 All commands are **interactive** (prompt on stdin) except `deals` and
 `cart edit --replace`/`cart edit --add`. Run interactive commands in the
@@ -31,7 +35,7 @@ output, it's probably waiting on that browser tab, not crashed.
 ### reorder -- place/rebuild the order
 
 ```bash
-uv run silpo-agent reorder --last N --threshold 0-1 [--budget UAH] [--optimize promos] [--yes]
+silpo-agent reorder --last N --threshold 0-1 [--budget UAH] [--optimize promos] [--yes]
 ```
 - `--last N` / `--threshold 0-1` are **required**. `--threshold 0.5` = item
   must appear in at least half of the last N orders to count as "typical."
@@ -66,8 +70,8 @@ uv run silpo-agent reorder --last N --threshold 0-1 [--budget UAH] [--optimize p
 ### smart-cart -- reorder, plus discounted favorites and a norm top-up
 
 ```bash
-uv run silpo-agent smart-cart --last N --threshold 0-1 [--people N] [--basket-type basic|eco|premium] [--budget UAH] [--yes]
-uv run silpo-agent smart-cart --no-reorder [--people N] [--basket-type basic|eco|premium] [--budget UAH] [--yes]
+silpo-agent smart-cart --last N --threshold 0-1 [--people N] [--basket-type basic|eco|premium] [--budget UAH] [--yes]
+silpo-agent smart-cart --no-reorder [--people N] [--basket-type basic|eco|premium] [--budget UAH] [--yes]
 ```
 - `--no-reorder` skips typical items (order history) entirely -- cart built
   from favorited-on-discount + norm top-up only. `--last`/`--threshold`
@@ -113,13 +117,13 @@ uv run silpo-agent smart-cart --no-reorder [--people N] [--basket-type basic|eco
 ### cart -- show / edit the current real cart
 
 ```bash
-uv run silpo-agent cart              # read-only: items, payable total, bonus balance
-uv run silpo-agent cart promos       # read-only: discounted alternatives per item
-uv run silpo-agent cart edit         # interactive: replace one item
-uv run silpo-agent cart edit --replace OLD_SLUG NEW_SLUG   # non-interactive swap
-uv run silpo-agent cart edit --add NEW_SLUG [--quantity N] # non-interactive add, no swap
-uv run silpo-agent cart edit --qty SLUG NUM                # set an existing line's quantity (absolute set, not +N)
-uv run silpo-agent cart edit --remove SLUG                 # delete a line, nothing added back
+silpo-agent cart              # read-only: items, payable total, bonus balance
+silpo-agent cart promos       # read-only: discounted alternatives per item
+silpo-agent cart edit         # interactive: replace one item
+silpo-agent cart edit --replace OLD_SLUG NEW_SLUG   # non-interactive swap
+silpo-agent cart edit --add NEW_SLUG [--quantity N] # non-interactive add, no swap
+silpo-agent cart edit --qty SLUG NUM                # set an existing line's quantity (absolute set, not +N)
+silpo-agent cart edit --remove SLUG                 # delete a line, nothing added back
 ```
 - Plain `cart` is the read-only check -- use this (not `reorder`) when the
   user just wants to know what's in the cart, since `reorder` mutates it.
@@ -155,7 +159,7 @@ uv run silpo-agent cart edit --remove SLUG                 # delete a line, noth
 ### delivery -- set address, delivery type, timeslot
 
 ```bash
-uv run silpo-agent delivery
+silpo-agent delivery
 ```
 Interactive only, no flags. Confirms address → pick delivery type
 (DeliveryHome, SelfPickup, NovaPoshta supported; anything else stops
@@ -167,9 +171,9 @@ under the new delivery context (informational only, nothing auto-removed).
 ### coupons / favorites-deals / deals -- read-only discovery
 
 ```bash
-uv run silpo-agent coupons            # active loyalty coupons: condition, validity, reward
-uv run silpo-agent favorites-deals    # own favorites currently discounted
-uv run silpo-agent deals [--limit N] [--category NAME] [--list-categories]  # store-wide biggest discounts, default limit 10
+silpo-agent coupons            # active loyalty coupons: condition, validity, reward
+silpo-agent favorites-deals    # own favorites currently discounted
+silpo-agent deals [--limit N] [--category NAME] [--list-categories]  # store-wide biggest discounts, default limit 10
 ```
 None of these touch the cart or account.
 - `--category NAME` scopes the scan to one category (e.g. `--category
@@ -192,8 +196,8 @@ None of these touch the cart or account.
 ### clear-context -- wipe local state and log out
 
 ```bash
-uv run silpo-agent clear-context          # asks for confirmation first
-uv run silpo-agent clear-context --yes    # skip the confirmation prompt
+silpo-agent clear-context          # asks for confirmation first
+silpo-agent clear-context --yes    # skip the confirmation prompt
 ```
 Deletes local Reorder Log + Substitution Memory
 (`~/.silpo-agent/reorder_log.json`) *and* clears the cached OAuth token

@@ -1,6 +1,7 @@
 # silpo-agent-cli
 
 [![Tests](https://github.com/MIt9/silpo-agent-cli/actions/workflows/test.yml/badge.svg)](https://github.com/MIt9/silpo-agent-cli/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/silpo-agent-cli.svg)](https://pypi.org/project/silpo-agent-cli/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
 
@@ -21,8 +22,13 @@ memorize flags or babysit the terminal yourself. See
 ## Setup
 
 ```bash
-uv sync
+uvx --from silpo-agent-cli silpo-agent   # run without installing
+pipx install silpo-agent-cli             # or install the `silpo-agent` command
 ```
+
+Developing this repo instead of just using it? Clone it and run `uv sync`
+(see [CONTRIBUTING.md](CONTRIBUTING.md)); use `uv run silpo-agent` in place
+of `silpo-agent` below.
 
 First run of any command that talks to the MCP server opens a browser for a
 one-time OAuth2.1+PKCE login; the token is cached in the OS keyring
@@ -30,7 +36,7 @@ afterward, so you won't be re-prompted until it expires.
 
 ## Commands
 
-Run `uv run silpo-agent --help` for the full list, or `<command> --help`
+Run `silpo-agent --help` for the full list, or `<command> --help`
 for a command's flags and examples. Every command is interactive where it
 matters (address/item confirmation) — run them somewhere you're watching,
 not backgrounded.
@@ -38,7 +44,7 @@ not backgrounded.
 ### `reorder` — rebuild the cart from your typical items
 
 ```bash
-uv run silpo-agent reorder --last 10 --threshold 0.5
+silpo-agent reorder --last 10 --threshold 0.5
 ```
 
 Looks at your recent online orders, works out which products you buy
@@ -69,8 +75,8 @@ new items, so reordering onto a non-empty cart can't blow past budget.
 ### `smart-cart` — typical items, discounted favorites, and norm top-up
 
 ```bash
-uv run silpo-agent smart-cart --last 10 --threshold 0.5
-uv run silpo-agent smart-cart --people 5 --basket-type premium --budget 1500
+silpo-agent smart-cart --last 10 --threshold 0.5
+silpo-agent smart-cart --people 5 --basket-type premium --budget 1500
 ```
 
 Runs the same typical-items pipeline as `reorder` (address confirmation,
@@ -110,13 +116,13 @@ from.
 ### `cart` — view, edit, and check promos on your current cart
 
 ```bash
-uv run silpo-agent cart            # read-only: items, payable total, bonus balance, validations
-uv run silpo-agent cart promos     # read-only: real promo alternatives for every item in the cart
-uv run silpo-agent cart edit       # interactive: replace one item (free-text search or promo browse)
-uv run silpo-agent cart edit --replace <old-slug> <new-slug>   # non-interactive swap
-uv run silpo-agent cart edit --add <new-slug> [--quantity N]   # non-interactive add, no swap
-uv run silpo-agent cart edit --qty <slug> <num>                # set an existing line's quantity (absolute, not a delta)
-uv run silpo-agent cart edit --remove <slug>                   # delete a line, nothing added back
+silpo-agent cart            # read-only: items, payable total, bonus balance, validations
+silpo-agent cart promos     # read-only: real promo alternatives for every item in the cart
+silpo-agent cart edit       # interactive: replace one item (free-text search or promo browse)
+silpo-agent cart edit --replace <old-slug> <new-slug>   # non-interactive swap
+silpo-agent cart edit --add <new-slug> [--quantity N]   # non-interactive add, no swap
+silpo-agent cart edit --qty <slug> <num>                # set an existing line's quantity (absolute, not a delta)
+silpo-agent cart edit --remove <slug>                   # delete a line, nothing added back
 ```
 
 Running `silpo-agent` with no subcommand at all is the same as `cart` — it
@@ -147,9 +153,9 @@ matched against your cart locally; the new one is resolved through
 ### `deals` — best current discounts store-wide
 
 ```bash
-uv run silpo-agent deals --limit 10               # default 10
-uv run silpo-agent deals --category "Овочі"        # scope to one category
-uv run silpo-agent deals --list-categories         # list every real category title
+silpo-agent deals --limit 10               # default 10
+silpo-agent deals --category "Овочі"        # scope to one category
+silpo-agent deals --list-categories         # list every real category title
 ```
 
 Independent of your cart — scans active promotion categories and shows the
@@ -163,13 +169,13 @@ read-only, no deals fetched.
 ### `favorites-deals` — your favorites that are currently discounted
 
 ```bash
-uv run silpo-agent favorites-deals
+silpo-agent favorites-deals
 ```
 
 ### `coupons` — your active loyalty coupons
 
 ```bash
-uv run silpo-agent coupons
+silpo-agent coupons
 ```
 
 Read-only list of what's active and what buying-condition triggers each
@@ -179,7 +185,7 @@ there's no "activate" step this tool can perform.
 ### `delivery` — set address, delivery type, and timeslot
 
 ```bash
-uv run silpo-agent delivery
+silpo-agent delivery
 ```
 
 Interactive: address (existing saved address, pick a different one, or
@@ -191,8 +197,8 @@ afterward — informational only, nothing gets swapped automatically.
 ### `clear-context` — wipe local reorder history, substitution memory, and cached login
 
 ```bash
-uv run silpo-agent clear-context          # asks for confirmation first
-uv run silpo-agent clear-context --yes    # skip the confirmation prompt
+silpo-agent clear-context          # asks for confirmation first
+silpo-agent clear-context --yes    # skip the confirmation prompt
 ```
 
 Wipes the local Reorder Log and Substitution Memory, and clears the cached
@@ -209,7 +215,9 @@ your real Silpo cart or calls the MCP server.
   promo") into the right invocation, handle the interactive prompts, and
   know this tool's quirks (cart-only scope in `reorder`, slugs vs. product
   names, where local history lives). Ships portable — no machine-specific
-  paths — so it works from wherever you clone this repo.
+  paths — so it works with `silpo-agent` installed from PyPI, no repo clone
+  needed. Grab it into an agent's skills dir, or point the agent at this
+  repo's copy directly.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) if you're extending the tool itself
 (TDD-first, test seams, PR expectations).
