@@ -59,11 +59,53 @@ consistently, checks they're still in stock, handles substitutions and
   auto-answered prompt is still printed, and the report still lists the
   address used, substitutions made, and items added.
 
-Confirms your delivery address, warns before touching a non-empty cart, and
-asks which replacement you want when an out-of-stock item has more than one
-candidate. `--budget` counts what's already in the cart (its own payable
-total) against the cap, not just the new items, so reordering onto a
-non-empty cart can't blow past budget.
+Confirms your delivery address, warns and asks before proceeding if your
+cart's delivery context has a real error (e.g. a stale timeslot), warns
+before touching a non-empty cart, and asks which replacement you want when
+an out-of-stock item has more than one candidate. `--budget` counts what's
+already in the cart (its own payable total) against the cap, not just the
+new items, so reordering onto a non-empty cart can't blow past budget.
+
+### `smart-cart` — typical items, discounted favorites, and norm top-up
+
+```bash
+uv run silpo-agent smart-cart --last 10 --threshold 0.5
+uv run silpo-agent smart-cart --people 5 --basket-type premium --budget 1500
+```
+
+Runs the same typical-items pipeline as `reorder` (address confirmation,
+substitution, non-empty-cart guard), then layers on two more sources:
+
+1. Any of your favorited products currently on discount that aren't already
+   in the resulting cart — deduplicated by product id, so a favorite that's
+   also a typical item is never added twice.
+2. A **norm top-up**: for any grocery category (vegetables, fruits, protein,
+   dairy, grains, pantry, coffee, tea) with no real product-id overlap with
+   what's already going into the cart, proposes an addition sized to
+   `--people N` and `--basket-type basic|eco|premium`, shown as its own list
+   with a separate `[y/N]` confirmation before joining the cart (typical
+   items and favorites-deals don't get this extra gate — they're known
+   purchases, norms are a guess). A few items (apples, premium-only
+   berries) scale up when out of season for the current month, flagged
+   with a printed note — prices always come from the real, live product
+   search, never a static seasonal price.
+
+- `--last N` / `--threshold T` — same as `reorder`. Required unless
+  `--no-reorder` is set.
+- `--no-reorder` — skip typical items entirely; cart built from
+  favorited-on-discount + norm top-up only.
+- `--people N` — household size the norm top-up scales to (default `1`).
+- `--basket-type basic|eco|premium` — norm generosity (default `eco`).
+- `--budget N` — like `reorder --budget`, but trims across all three
+  sources in priority order when over budget: norm items drop first, then
+  favorited deals, then typical items as a last resort.
+- `--yes` / `-y` — same as `reorder`: non-interactive, every auto-answered
+  prompt (including the norm top-up confirmation) still printed.
+
+The report lists all three sources separately ("Added N typical item(s)" /
+"Added M favorited deal(s)" / "Added K norm item(s)"), and a `--budget`
+trim's "Trimmed" section is labeled by which source each dropped item came
+from.
 
 ### `cart` — view, edit, and check promos on your current cart
 

@@ -88,6 +88,37 @@ def test_cart_edit_interactive_happy_path_swaps_item(capsys, tmp_path):
     ) in client.calls
 
 
+def test_cart_edit_interactive_aborts_on_declined_validation_error(capsys, tmp_path):
+    """Interactive `cart edit` (no flags) gates on an error-level validation
+    the same way reorder/smart-cart do -- flag-based --replace/--add/etc
+    stay zero-prompt regardless (see cli.py's _run_cart_edit)."""
+    products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
+    client = FakeClient(
+        {
+            **_resolved_cart_context_with_products(products),
+            "silpo_get_shopping_cart_by_id": {
+                "success": True,
+                "cart": {
+                    "deliveryType": "DeliveryHome",
+                    "timeslot": {"start": "2026-08-05T16:00:00", "end": "2026-08-05T17:30:00"},
+                    "shipments": [{"companyId": "c1", "branchId": "b1", "products": products}],
+                    "calculation": {"validations": [{"level": "error", "message": "timeslot.not_found"}]},
+                },
+            },
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(["cart", "edit"], client=client, log_store=log_store, input_fn=lambda prompt="": "n")
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "timeslot.not_found" in out
+    assert "Aborted" in out
+    assert all(call[0] != "silpo_remove_cart_products" for call in client.calls)
+    assert all(call[0] != "silpo_add_or_update_cart_products" for call in client.calls)
+
+
 def test_cart_edit_interactive_decline_confirmation_leaves_cart_untouched(capsys, tmp_path):
     products = [{"productId": "milk", "slug": "milk", "companyId": "c1", "branchId": "b1", "quantity": 1, "name": "Молоко"}]
     client = FakeClient(

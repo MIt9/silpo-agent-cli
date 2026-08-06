@@ -75,11 +75,12 @@ def _candidate_id(candidate: dict) -> str | None:
     return candidate.get("id") or candidate.get("productId")
 
 
-def _to_item(candidate: dict, frequency: float, fallback_price: float) -> TypicalItem:
+def _to_item(candidate: dict, frequency: float, fallback_price: float, quantity: float) -> TypicalItem:
     return TypicalItem(
         product_id=_candidate_id(candidate),
         frequency=frequency,
         last_known_price=candidate.get("price", fallback_price),
+        quantity=quantity,
     )
 
 
@@ -176,13 +177,18 @@ def _resolve_one(
         return None, None
 
     if len(candidates) == 1:
-        return _to_item(candidates[0], item.frequency, item.last_known_price), item.product_id
+        return _to_item(candidates[0], item.frequency, item.last_known_price, item.quantity), item.product_id
 
     remembered_id = log_store.get_substitution(item.product_id)
     if remembered_id is not None:
         match = next((c for c in candidates if _candidate_id(c) == remembered_id), None)
         price = match.get("price", item.last_known_price) if match else item.last_known_price
-        return TypicalItem(product_id=remembered_id, frequency=item.frequency, last_known_price=price), item.product_id
+        return (
+            TypicalItem(
+                product_id=remembered_id, frequency=item.frequency, last_known_price=price, quantity=item.quantity
+            ),
+            item.product_id,
+        )
 
     print_fn(f"{item.product_id} is unavailable. Choose a replacement:")
     for i, candidate in enumerate(candidates, start=1):
@@ -195,7 +201,7 @@ def _resolve_one(
 
     chosen = candidates[idx - 1]
     log_store.set_substitution(item.product_id, _candidate_id(chosen))
-    return _to_item(chosen, item.frequency, item.last_known_price), item.product_id
+    return _to_item(chosen, item.frequency, item.last_known_price, item.quantity), item.product_id
 
 
 def resolve_substitutions(

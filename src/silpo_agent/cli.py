@@ -17,11 +17,12 @@ promo-related MCP calls (CONTEXT.md's "Promo optimization" entry).
 
 import argparse
 import sys
+from datetime import date
 from importlib.metadata import version
 
 from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient, TokenStore
-from silpo_agent.cart_context import resolve_cart_context
+from silpo_agent.cart_context import confirm_no_blocking_validations, resolve_cart_context
 from silpo_agent.cart_editor import (
     add_cart_item,
     CartEditError,
@@ -32,16 +33,18 @@ from silpo_agent.cart_editor import (
     swap_cart_item,
 )
 from silpo_agent.cart_viewer import format_cart
-from silpo_agent.cart_writer import write_cart
+from silpo_agent.cart_writer import trim_by_source_priority, write_cart
 from silpo_agent.coupons_lister import list_coupons
 from silpo_agent.delivery_settings import run_delivery_settings
 from silpo_agent.favorites_deals import list_favorites_deals
 from silpo_agent.log_store import ReorderLogStore
-from silpo_agent.order_aggregator import InsufficientOrderHistoryError, derive_typical_items
+from silpo_agent.norm_dataset import get_norms
+from silpo_agent.norm_top_up import find_uncovered_categories, resolve_norm_top_up_items
+from silpo_agent.order_aggregator import InsufficientOrderHistoryError, TypicalItem, derive_typical_items
 from silpo_agent.promo_finder import find_promo_alternatives
 from silpo_agent.promo_optimizer import optimize_promos
 from silpo_agent.promo_scanner import CategoryNotFoundError, list_category_titles, resolve_category, scan_deals
-from silpo_agent.substitution_resolver import resolve_substitutions
+from silpo_agent.substitution_resolver import SubstitutionResult, resolve_substitutions
 from silpo_agent.timeslot_format import format_timeslot
 
 
@@ -86,6 +89,19 @@ def _run_reorder(
         client, resolved_address=address, log_store=log_store, input_fn=input_fn, print_fn=print_fn
     )
 
+    if address:
+        print_fn(f"Delivering to: {address.label}")
+    if cart_context.delivery_type:
+        print_fn(f"Delivery type: {cart_context.delivery_type}")
+    if cart_context.timeslot_start:
+        print_fn(f"Timeslot: {format_timeslot(cart_context.timeslot_start, cart_context.timeslot_end)}")
+    else:
+        print_fn("Timeslot: not set yet -- run 'silpo-agent delivery' to choose one")
+
+    if not confirm_no_blocking_validations(cart_context, input_fn=input_fn, print_fn=print_fn):
+        print_fn("Aborted: fix the delivery context (e.g. run 'silpo-agent delivery') and try again.")
+        return 1
+
     orders_response = client.call("silpo_get_my_online_orders", {"limit": min(last, 100)}) or []
     orders = orders_response.get("orders", []) if isinstance(orders_response, dict) else orders_response
     try:
@@ -106,14 +122,6 @@ def _run_reorder(
 
     report = write_cart(client, items, cart_context, budget=budget, input_fn=input_fn, print_fn=print_fn)
 
-    if address:
-        print(f"Delivering to: {address.label}")
-    if cart_context.delivery_type:
-        print(f"Delivery type: {cart_context.delivery_type}")
-    if cart_context.timeslot_start:
-        print(f"Timeslot: {format_timeslot(cart_context.timeslot_start, cart_context.timeslot_end)}")
-    else:
-        print("Timeslot: not set yet -- run 'silpo-agent delivery' to choose one")
     for original_id, replacement_id in substitution_result.substitutions:
         print(f"Substituted {original_id} -> {replacement_id}")
     if substitution_result.unavailable:
@@ -130,6 +138,185 @@ def _run_reorder(
             print(f"  - {product_id}: {price:.2f}")
     print(f"Added {len(report.items_added)} item(s):")
     for product_id, price in report.items_added:
+        print(f"  - {product_id}: {price:.2f}")
+    print(f"Total: {report.total:.2f}")
+    print("Check your cart: https://silpo.ua/basket")
+    return 0
+
+
+def _current_month() -> int:
+    """The one place `_run_smart_cart` reads the real clock (ticket 06) --
+    `norm_dataset.get_norms`/`norm_top_up.resolve_norm_top_up_items` stay
+    pure and take `month` as an explicit argument instead."""
+    return date.today().month
+
+
+def _run_smart_cart(
+    last: int | None,
+    threshold: float | None,
+    client,
+    log_store,
+    yes: bool = False,
+    print_fn=None,
+    people: int = 1,
+    basket_type: str = "eco",
+    budget: float | None = None,
+    no_reorder: bool = False,
+) -> int:
+    """Ticket 02/04/05: same pipeline as `_run_reorder` (Address Resolver ->
+    Cart Context Resolver -> Order Aggregator -> Substitution Resolver ->
+    Cart Writer), plus two extra stages layered on top of the typical
+    items, in order: discounted favorites (Favorites Deals, ticket 02,
+    deduplicated by product id), then a norm top-up (ticket 04) -- for any
+    norm-dataset category with no real product-id overlap with what's
+    already going into the cart, the top search result for that norm's
+    product name is proposed (at `quantity_per_person * people`, rounded to
+    a valid step) and shown as its own list with a single [y/N] gate before
+    being folded into the one `write_cart` call. Declining adds nothing
+    from norms; typical items and favorites-deals are unaffected either
+    way.
+
+    Ticket 05: if --budget is set and the combined total would exceed it,
+    `cart_writer.trim_by_source_priority` trims norm items first (they're
+    guesses, not known purchases), then favorites-deals, then typical items
+    as the last resort -- deliberately NOT the single merged-list `budget=`
+    path `write_cart` offers (that trims by frequency across the whole
+    list at once, which would mis-order norms/favorites since both are
+    built with frequency=0.0). The already-trimmed list is passed to
+    `write_cart` with `budget=None` since the trim already happened."""
+    print_fn = print_fn or print
+    input_fn = _auto_yes_input_fn(print_fn) if yes else None
+
+    if people <= 0:
+        print_fn(f"smart-cart: --people must be a positive integer, got {people}")
+        return 1
+
+    if not no_reorder and (last is None or threshold is None):
+        print_fn("smart-cart: --last/--threshold are required unless --no-reorder is set")
+        return 1
+
+    address = resolve_address(client, log_store, input_fn=input_fn, print_fn=print_fn)
+    if address is None:
+        print("smart-cart: no delivery address resolved; aborting before product search", file=sys.stderr)
+        return 1
+
+    cart_context = resolve_cart_context(
+        client, resolved_address=address, log_store=log_store, input_fn=input_fn, print_fn=print_fn
+    )
+
+    if address:
+        print_fn(f"Delivering to: {address.label}")
+    if cart_context.delivery_type:
+        print_fn(f"Delivery type: {cart_context.delivery_type}")
+    if cart_context.timeslot_start:
+        print_fn(f"Timeslot: {format_timeslot(cart_context.timeslot_start, cart_context.timeslot_end)}")
+    else:
+        print_fn("Timeslot: not set yet -- run 'silpo-agent delivery' to choose one")
+
+    if not confirm_no_blocking_validations(cart_context, input_fn=input_fn, print_fn=print_fn):
+        print_fn("Aborted: fix the delivery context (e.g. run 'silpo-agent delivery') and try again.")
+        return 1
+
+    if no_reorder:
+        substitution_result = SubstitutionResult(items=[], substitutions=[], unavailable=[])
+    else:
+        orders_response = client.call("silpo_get_my_online_orders", {"limit": min(last, 100)}) or []
+        orders = orders_response.get("orders", []) if isinstance(orders_response, dict) else orders_response
+        try:
+            typical_items = derive_typical_items(orders, last=last, threshold=threshold)
+        except InsufficientOrderHistoryError as exc:
+            print(f"smart-cart: {exc}", file=sys.stderr)
+            return 1
+
+        substitution_result = resolve_substitutions(
+            client, log_store, typical_items, cart_context, input_fn=input_fn, print_fn=print_fn
+        )
+    items = substitution_result.items
+    typical_ids = {item.product_id for item in items}
+
+    favorite_deals = list_favorites_deals(
+        client, log_store, input_fn=input_fn, print_fn=print_fn, cart_context=cart_context
+    )
+    favorite_items = [
+        TypicalItem(product_id=deal.product_id, frequency=0.0, last_known_price=deal.price, name=deal.name)
+        for deal in favorite_deals
+        if deal.product_id and deal.product_id not in typical_ids
+    ]
+    favorite_ids = {item.product_id for item in favorite_items}
+
+    # Ticket 04: norm top-up. Categories already covered by a typical item
+    # or a favorites-deal addition (real id intersection, not "did we search
+    # for the same id") are skipped; the rest get a proposed addition, shown
+    # and gated behind its own [y/N] before joining the single write_cart
+    # call below.
+    covered_ids = typical_ids | favorite_ids
+    month = _current_month()
+    norms = get_norms(basket_type, month=month)
+    uncovered_norms = find_uncovered_categories(client, cart_context, norms, covered_ids, print_fn=print_fn)
+    norm_result = resolve_norm_top_up_items(
+        client, cart_context, uncovered_norms, people, month=month, print_fn=print_fn
+    )
+    # Defensive: a norm search can in principle resurface a product already
+    # going into the cart (e.g. the category-coverage cap missed it) --
+    # dropped here rather than risking a duplicate cart line.
+    norm_candidates = [item for item in norm_result.items if item.product_id not in covered_ids]
+
+    norm_items: list[TypicalItem] = []
+    if norm_candidates:
+        print_fn("Adding from norms:")
+        for item in norm_candidates:
+            note = (
+                " (out of season -- expect a higher price than usual)"
+                if item in norm_result.out_of_season_items
+                else ""
+            )
+            print_fn(f"  - {item.name or item.product_id}: {item.last_known_price:.2f} x{item.quantity}{note}")
+        confirm_input = input_fn or input
+        answer = confirm_input("Add these norm top-up items to the cart? [y/N] ").strip().lower()
+        if answer in ("y", "yes"):
+            norm_items = norm_candidates
+    norm_ids = {item.product_id for item in norm_items}
+
+    trimmed_by_source: list[tuple[str, str, float]] = []
+    if budget is not None:
+        already_spent = cart_context.total_after_discounts or 0.0
+        cart_items, trimmed_by_source = trim_by_source_priority(
+            [("norm", norm_items), ("favorite", favorite_items), ("typical", items)], budget, already_spent
+        )
+    else:
+        cart_items = items + favorite_items + norm_items
+
+    report = write_cart(client, cart_items, cart_context, input_fn=input_fn, print_fn=print_fn)
+
+    for original_id, replacement_id in substitution_result.substitutions:
+        print(f"Substituted {original_id} -> {replacement_id}")
+    if substitution_result.unavailable:
+        print(f"Unavailable ({len(substitution_result.unavailable)}): {', '.join(substitution_result.unavailable)}")
+
+    if report.aborted:
+        return 1
+
+    if trimmed_by_source:
+        print(f"Trimmed {len(trimmed_by_source)} item(s) to fit budget {budget:.2f}:")
+        for source, product_id, price in trimmed_by_source:
+            print(f"  - [{source}] {product_id}: {price:.2f}")
+
+    # Ticket 02/04 AC: report lists typical items, favorites-deals, and norm
+    # additions distinctly, so the user can tell which source added what.
+    typical_added = [
+        (pid, price) for pid, price in report.items_added if pid not in favorite_ids and pid not in norm_ids
+    ]
+    favorite_added = [(pid, price) for pid, price in report.items_added if pid in favorite_ids]
+    norm_added = [(pid, price) for pid, price in report.items_added if pid in norm_ids]
+
+    print(f"Added {len(typical_added)} typical item(s):")
+    for product_id, price in typical_added:
+        print(f"  - {product_id}: {price:.2f}")
+    print(f"Added {len(favorite_added)} favorited deal(s):")
+    for product_id, price in favorite_added:
+        print(f"  - {product_id}: {price:.2f}")
+    print(f"Added {len(norm_added)} norm item(s):")
+    for product_id, price in norm_added:
         print(f"  - {product_id}: {price:.2f}")
     print(f"Total: {report.total:.2f}")
     print("Check your cart: https://silpo.ua/basket")
@@ -345,6 +532,15 @@ def _run_cart_edit(
     if remove is not None:
         return _run_cart_edit_remove(client, cart_context, remove, print_fn)
 
+    # Only the interactive path (no --replace/--add/--qty/--remove flag)
+    # gates on validation errors -- the flag-based paths are documented as
+    # zero-prompt/non-interactive (SKILL.md), so blocking on `input_fn` here
+    # would hang automation that relies on that contract. The validation
+    # itself was still printed above via resolve_cart_context regardless.
+    if not confirm_no_blocking_validations(cart_context, input_fn=input_fn, print_fn=print_fn):
+        print_fn("Aborted: fix the delivery context (e.g. run 'silpo-agent delivery') and try again.")
+        return 1
+
     return _run_cart_edit_interactive(client, cart_context, input_fn, print_fn)
 
 
@@ -468,6 +664,7 @@ commands:
   cart edit       manually replace one cart item with another, or add a new one
   cart promos     show real promo alternatives for every item in your cart (read-only)
   reorder         rebuild your cart from your typical (frequently-bought) items
+  smart-cart      reorder, plus discounted favorites and a norm top-up (--people/--basket-type/--budget)
   delivery        explicitly set your delivery address, delivery type, and timeslot
   clear-context   wipe your local reorder history, substitution memory, and cached login
   coupons         list your active loyalty coupons (read-only)
@@ -668,6 +865,69 @@ def main(
         "substitutions made, and items added -- nothing is decided silently.",
     )
 
+    smart_cart_parser = subparsers.add_parser(
+        "smart-cart",
+        help="Rebuild the cart from your typical items, plus discounted favorites and a norm top-up",
+        description="Rebuild your Silpo cart from your typical items (same as `reorder`), plus add any of your "
+        "favorited products currently on discount that aren't already in the cart, plus a norm top-up: for any "
+        "grocery category not covered by the above, propose products sized to --people/--basket-type, gated "
+        "behind their own confirmation. Fills the cart only -- checkout/payment is always a manual step.",
+    )
+    smart_cart_parser.add_argument(
+        "--last",
+        type=int,
+        default=None,
+        metavar="N",
+        help="How many of your most recent online orders to consider. Required unless --no-reorder is set. "
+        "Errors out (without touching the cart) if you have fewer than N orders.",
+    )
+    smart_cart_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        metavar="0-1",
+        help="Minimum share of the --last orders a product must appear in to count as a 'typical item' "
+        "(e.g. 0.5 = bought in at least half of them). Required unless --no-reorder is set.",
+    )
+    smart_cart_parser.add_argument(
+        "--no-reorder",
+        action="store_true",
+        help="Skip typical items (order history) entirely -- cart is built from discounted favorites and "
+        "the norm top-up only. --last/--threshold aren't needed with this.",
+    )
+    smart_cart_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Non-interactive: auto-confirm the proposed delivery address, auto-confirm adding to a "
+        "non-empty cart, auto-pick the first candidate on any substitution with multiple replacements, and "
+        "auto-confirm the proposed norm top-up additions.",
+    )
+    smart_cart_parser.add_argument(
+        "--people",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Household size used to scale norm top-up quantities (quantity_per_person * N). Must be a "
+        "positive integer. Default: 1.",
+    )
+    smart_cart_parser.add_argument(
+        "--basket-type",
+        choices=["basic", "eco", "premium"],
+        default="eco",
+        help="Which household norm dataset to top up uncovered categories from. Default: eco.",
+    )
+    smart_cart_parser.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        metavar="UAH",
+        help="Optional spend cap in UAH. If the combined total exceeds it, items are trimmed by source "
+        "priority: norm top-up items first (guesses, not known purchases), then favorited deals, then "
+        "typical items as the last resort -- lowest-frequency-first within each source. Omit to add "
+        "everything and just report the total.",
+    )
+
     cart_parser = subparsers.add_parser(
         "cart",
         help="Show your current real cart (read-only); `cart edit`/`cart promos` for more",
@@ -819,6 +1079,20 @@ def main(
             optimize=args.optimize,
             yes=args.yes,
             print_fn=print_fn,
+        )
+
+    if args.command == "smart-cart":
+        return _run_smart_cart(
+            args.last,
+            args.threshold,
+            client or MCPClient(),
+            log_store or ReorderLogStore(),
+            yes=args.yes,
+            print_fn=print_fn,
+            people=args.people,
+            basket_type=args.basket_type,
+            budget=args.budget,
+            no_reorder=args.no_reorder,
         )
 
     if args.command == "cart":

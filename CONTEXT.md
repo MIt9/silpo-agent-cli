@@ -9,7 +9,7 @@ The subcommand that rebuilds a cart from the user's historical online orders rat
 _Avoid_: Reorder Optimizer CLI (product-idea name, not the domain term)
 
 **Typical item**:
-A product considered part of the user's regular purchase pattern, determined by its frequency across a set of the user's recent online orders (appears in at least a configurable share of them). Distinct from a *Favorite*, which is an explicit like the user set directly, independent of purchase history.
+A product considered part of the user's regular purchase pattern, determined by its frequency across a set of the user's recent online orders (appears in at least a configurable share of them). Its cart quantity is the arithmetic mean of that product's per-order quantity, averaged only over the orders it actually appeared in — not diluted by orders it was absent from. Distinct from a *Favorite*, which is an explicit like the user set directly, independent of purchase history.
 _Avoid_: recurring item, regular purchase
 
 **Substitution decision**:
@@ -20,6 +20,9 @@ Applying promotions to a reorder cart in two ways: swapping a typical item for a
 
 **Non-empty cart guard**:
 The rule that the Reorder flow always warns before mutating the cart if it already contains items from a prior session, rather than silently adding on top or clearing it.
+
+**Delivery context validation guard**:
+The rule that `reorder`, `smart-cart`, and interactive `cart edit` (not the zero-prompt `cart edit --replace`/`--add`/`--qty`/`--remove` flags) confirm before proceeding if the resolved cart's `calculation.validations[]` contains any `level: "error"` entry (e.g. `timeslot.not_found`) — same warn-and-proceed-or-abort shape as the Non-empty cart guard, and `--yes` auto-confirms it the same way. Added after a live run against a stale timeslot let every typical-item/norm availability check silently report "unavailable" while the favorites-deals path (which does no availability check) added real out-of-stock items to the cart. Read-only commands (`cart`, `deals`, `favorites-deals`, `cart promos`) don't gate — they already surface validations via print, nothing to abort.
 
 **Reorder flow — cart-only scope**:
 The Reorder flow stops at filling the cart; it never calls checkout or payment. Order placement stays a manual step in the Silpo app/site.

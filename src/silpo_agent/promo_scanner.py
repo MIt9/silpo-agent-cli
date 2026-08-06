@@ -133,21 +133,16 @@ class CategoryMatch:
     exact: bool
 
 
-def resolve_category(client, cart_context: CartContext, query: str) -> CategoryMatch | None:
-    """Free-text category name (e.g. "Овочі") -> matched real category, plus
-    whether the match was exact. `silpo_get_products`'s own `category` filter
-    takes a slug, not a name -- a free-text name there silently matches
-    nothing (live-verified). Exact (case-insensitive) title match wins;
-    otherwise the shortest title containing the query, on the theory that a
-    shorter title is the more specific category (e.g. "Овочі" over "Фрукти,
-    овочі"). Issue #05: `exact=False` signals the CLI should warn the user
-    which real category it fell back to, since a query like "Вино" can
-    otherwise silently match "Виноград" instead."""
+def resolve_category_from_list(categories: list[dict], query: str) -> CategoryMatch | None:
+    """Same matching logic as `resolve_category`, against an already-fetched
+    category list -- lets a caller that needs to match several queries
+    (norm_top_up.py's per-norm-category-tag lookup) fetch the paginated
+    category tree once and reuse it, instead of `resolve_category` calling
+    `_fetch_all_categories` fresh on every single query."""
     query_lower = query.strip().lower()
     if not query_lower:
         return None
 
-    categories = _fetch_all_categories(client, cart_context)
     exact = [c for c in categories if (c.get("title") or "").strip().lower() == query_lower]
     if exact:
         return CategoryMatch(slug=exact[0].get("slug"), title=exact[0].get("title"), exact=True)
@@ -158,6 +153,20 @@ def resolve_category(client, cart_context: CartContext, query: str) -> CategoryM
     partial.sort(key=lambda c: len(c.get("title") or ""))
     best = partial[0]
     return CategoryMatch(slug=best.get("slug"), title=best.get("title"), exact=False)
+
+
+def resolve_category(client, cart_context: CartContext, query: str) -> CategoryMatch | None:
+    """Free-text category name (e.g. "Овочі") -> matched real category, plus
+    whether the match was exact. `silpo_get_products`'s own `category` filter
+    takes a slug, not a name -- a free-text name there silently matches
+    nothing (live-verified). Exact (case-insensitive) title match wins;
+    otherwise the shortest title containing the query, on the theory that a
+    shorter title is the more specific category (e.g. "Овочі" over "Фрукти,
+    овочі"). Issue #05: `exact=False` signals the CLI should warn the user
+    which real category it fell back to, since a query like "Вино" can
+    otherwise silently match "Виноград" instead."""
+    categories = _fetch_all_categories(client, cart_context)
+    return resolve_category_from_list(categories, query)
 
 
 def list_category_titles(client, cart_context: CartContext) -> list[str]:

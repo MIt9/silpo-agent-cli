@@ -1,5 +1,5 @@
 from silpo_agent.address_resolver import ResolvedAddress
-from silpo_agent.cart_context import resolve_cart_context
+from silpo_agent.cart_context import CartContext, confirm_no_blocking_validations, resolve_cart_context
 
 
 class FakeClient:
@@ -279,3 +279,45 @@ def test_missing_shopping_cart_id_skips_second_call_and_returns_empty_context():
     assert context.validations == []
     assert context.products == []
     assert all(call[0] != "silpo_get_shopping_cart_by_id" for call in client.calls)
+
+
+def _context_with_validations(validations):
+    return CartContext(
+        shopping_cart_id="cart-1",
+        branch_id="b1",
+        company_id="c1",
+        delivery_type="DeliveryHome",
+        timeslot_start=None,
+        timeslot_end=None,
+        validations=validations,
+    )
+
+
+def test_confirm_no_blocking_validations_no_errors_proceeds_without_prompting():
+    context = _context_with_validations([{"level": "warning", "message": "order.adult.is_not_confirmed"}])
+
+    proceed = confirm_no_blocking_validations(
+        context, input_fn=lambda prompt="": (_ for _ in ()).throw(AssertionError("should not prompt")), print_fn=lambda *a: None
+    )
+
+    assert proceed is True
+
+
+def test_confirm_no_blocking_validations_error_prompts_and_proceeds_on_yes():
+    context = _context_with_validations([{"level": "error", "message": "timeslot.not_found"}])
+    printed = []
+
+    proceed = confirm_no_blocking_validations(
+        context, input_fn=lambda prompt="": "y", print_fn=printed.append
+    )
+
+    assert proceed is True
+    assert any("1 cart validation error" in line for line in printed)
+
+
+def test_confirm_no_blocking_validations_error_aborts_on_decline():
+    context = _context_with_validations([{"level": "error", "message": "timeslot.not_found"}])
+
+    proceed = confirm_no_blocking_validations(context, input_fn=lambda prompt="": "n", print_fn=lambda *a: None)
+
+    assert proceed is False

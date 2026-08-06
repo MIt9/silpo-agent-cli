@@ -27,10 +27,11 @@ live-verified):
   or a substitution/promo-resolved item; if either is missing (e.g. a
   substituted item that didn't carry it through) this falls back to the
   CartContext's own branch/company, since a cart's items all live under one
-  branch/company already. Each Typical Item is added at quantity 1 with
-  `addQuantity=True` (adds to, rather than overwrites, any existing
-  quantity) -- the Order Aggregator's Typical Item doesn't carry a
-  usual-quantity signal, so this ticket assumes 1, same as before.
+  branch/company already. Each Typical Item is added at `item.quantity`
+  (defaults to 1) with `addQuantity=True` (adds to, rather than overwrites,
+  any existing quantity) -- most sources still leave this at the default 1,
+  but norm top-up items (see norm_top_up.py) carry a real computed quantity,
+  rounded via `round_to_step` for weighted goods.
   `comment` is always null; nothing upstream produces one.
 - Plastic-bag-style items (пакет / пакет з пакетів / пакет-майка) are
   always skipped before the add call, per the tool's own guidance -- see
@@ -46,12 +47,36 @@ price rather than trusting a total in the add call's response, since that
 response shape remains unverified (mutating tool, not exercised live).
 """
 
+import math
 from dataclasses import dataclass, field
 
 from silpo_agent.cart_context import CartContext
 from silpo_agent.order_aggregator import TypicalItem
 
 _PLASTIC_BAG_KEYWORD = "пакет"
+
+
+def round_to_step(raw_quantity: float, *, step: float | None) -> float:
+    """Rounds a raw desired quantity UP to the nearest valid multiple of the
+    product's own `step` (docs/mcp_schema.md's cart-tools note: quantity
+    must be a multiple of `step`, e.g. 0.35 for loose cucumbers, 1 for
+    whole-unit goods) -- always ceils, never rounds to nearest/down, so the
+    result never under-covers what `raw_quantity` asked for. Falls back to
+    ceiling to the next whole unit if `step` is missing/zero.
+
+    Note: this assumes `raw_quantity` is already expressed in the same unit
+    the product's own `step` is measured in (`ratio` on the product record,
+    e.g. "кг"/"л"/"шт") -- the real API's `weighted` flag does NOT reliably
+    signal this (a live-observed "Оселедець під шубою" salad has
+    `weighted: false` yet `ratio: "кг"`, `step: 0.25`). Converting a
+    kg-denominated target into a "шт" (piece/pack) product's quantity would
+    need the pack's real net weight, which isn't exposed anywhere on the
+    product record or its `attributes` -- callers must check `ratio`
+    compatibility themselves before calling this (see norm_top_up.py).
+    """
+    if step:
+        return round(math.ceil(raw_quantity / step) * step, 6)
+    return math.ceil(raw_quantity)
 
 
 @dataclass(frozen=True)
@@ -88,6 +113,46 @@ def _trim_to_budget(
 
     kept = [item for item in items if item.product_id not in dropped_ids]
     trimmed = [item for item in items if item.product_id in dropped_ids]
+    return kept, trimmed
+
+
+def trim_by_source_priority(
+    source_groups: list[tuple[str, list[TypicalItem]]], budget: float, already_spent: float = 0.0
+) -> tuple[list[TypicalItem], list[tuple[str, str, float]]]:
+    """Cascading budget trim across ordered item sources (smart-cart's
+    `--budget`, ticket 05). `source_groups` is `[(label, items), ...]`
+    listed drop-first-to-drop-last (e.g. norm items before favorites-deals
+    before typical items): an earlier source is trimmed down to nothing
+    before a single item from a later source is touched. Each source's own
+    trim reuses `_trim_to_budget`'s existing lowest-frequency-then-
+    product_id tie-break, threading the running spent-so-far through as its
+    `already_spent` -- so the last group gets exactly the same trim
+    `write_cart`'s single-source `budget=` path already gives `reorder`.
+    Returns `(kept_items, trimmed)` where `trimmed` is
+    `[(source_label, product_id, price), ...]`, so the report can say which
+    source each dropped item came from.
+
+    Each group's own budget must reserve room for every *later* (higher-
+    priority) group's full total, otherwise a naive forward pass would fill
+    the budget with the first (lowest-priority) group and starve the last
+    one -- so this trims each group against `budget - sum(later groups'
+    totals)`, computed as a suffix sum, not against the raw `budget`.
+    """
+    group_totals = [sum(item.last_known_price for item in items) for _, items in source_groups]
+    later_totals = [0.0] * len(source_groups)
+    running = 0.0
+    for i in range(len(source_groups) - 1, -1, -1):
+        later_totals[i] = running
+        running += group_totals[i]
+
+    kept: list[TypicalItem] = []
+    trimmed: list[tuple[str, str, float]] = []
+    spent = already_spent
+    for i, (label, items) in enumerate(source_groups):
+        group_kept, group_trimmed = _trim_to_budget(items, budget - later_totals[i], spent)
+        kept.extend(group_kept)
+        trimmed.extend((label, item.product_id, item.last_known_price) for item in group_trimmed)
+        spent += sum(item.last_known_price for item in group_kept)
     return kept, trimmed
 
 
@@ -137,7 +202,7 @@ def write_cart(
                     "productId": item.product_id,
                     "companyId": item.company_id or cart_context.company_id,
                     "branchId": item.branch_id or cart_context.branch_id,
-                    "quantity": 1,
+                    "quantity": item.quantity,
                     "addQuantity": True,
                 }
                 for item in items_to_add

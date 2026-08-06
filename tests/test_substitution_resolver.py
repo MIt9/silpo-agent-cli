@@ -142,6 +142,63 @@ def test_exactly_one_candidate_auto_applies_without_prompt():
     assert log_store.sets == []
 
 
+def test_single_candidate_substitution_carries_quantity_through():
+    """A typical item's real usual-quantity (from order history's mean,
+    order_aggregator.py) must survive a substitution -- otherwise it
+    silently resets to the 1.0 default the moment a usual purchase happens
+    to be unavailable."""
+    item = TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0, quantity=2.5)
+    client = FakeClient(
+        {
+            "silpo_find_products_batch": _available_batch_response(["milk"], unavailable_ids=["milk"]),
+            "silpo_get_replacements": {
+                "success": True,
+                "summary": "Found replacements for 1 products",
+                "items": [{"productId": "milk", "replacements": [{"id": "milk-oat", "price": 50.0}]}],
+            },
+        }
+    )
+    log_store = FakeLogStore()
+
+    result = resolve_substitutions(
+        client, log_store, [item], CART_CONTEXT, input_fn=lambda p="": "", print_fn=lambda *a: None
+    )
+
+    assert result.items == [TypicalItem(product_id="milk-oat", frequency=1.0, last_known_price=50.0, quantity=2.5)]
+
+
+def test_remembered_substitution_carries_quantity_through():
+    item = TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0, quantity=2.5)
+    client = FakeClient(
+        {
+            "silpo_find_products_batch": _available_batch_response(["milk"], unavailable_ids=["milk"]),
+            "silpo_get_replacements": {
+                "success": True,
+                "summary": "Found replacements for 1 products",
+                "items": [
+                    {
+                        "productId": "milk",
+                        "replacements": [
+                            {"id": "milk-oat", "price": 50.0},
+                            {"id": "milk-soy", "price": 48.0},
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+    log_store = FakeLogStore(substitutions={"milk": "milk-soy"})
+
+    def input_fn(prompt=""):
+        raise AssertionError("should not prompt when a memory entry exists")
+
+    result = resolve_substitutions(
+        client, log_store, [item], CART_CONTEXT, input_fn=input_fn, print_fn=lambda *a: None
+    )
+
+    assert result.items == [TypicalItem(product_id="milk-soy", frequency=1.0, last_known_price=48.0, quantity=2.5)]
+
+
 def test_multiple_candidates_no_memory_asks_user_and_persists_choice():
     item = TypicalItem(product_id="milk", frequency=1.0, last_known_price=45.0)
     client = FakeClient(

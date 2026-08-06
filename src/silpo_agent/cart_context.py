@@ -86,6 +86,27 @@ class CartContext:
     total_after_discounts: float | None = None
 
 
+def confirm_no_blocking_validations(cart_context: CartContext, *, input_fn=None, print_fn=None) -> bool:
+    """Real gate for mutating commands (reorder/smart-cart/cart edit), not
+    read-only ones: `resolve_cart_context` already surfaces every validation
+    via `print_fn` regardless, but never blocks (see its own docstring).
+    An error-level validation (e.g. `timeslot.not_found`) means the
+    delivery context a mutation is about to search/add against is stale or
+    broken -- ask before proceeding, same warn-and-proceed-or-abort pattern
+    as the Cart Writer's non-empty-cart guard. Warning/info-level
+    validations don't gate; only `level == "error"` does."""
+    input_fn = input_fn or input
+    print_fn = print_fn or print
+
+    errors = [v for v in cart_context.validations if v.get("level") == "error"]
+    if not errors:
+        return True
+
+    print_fn(f"Warning: {len(errors)} cart validation error(s) found (see above) -- delivery context may be stale.")
+    answer = input_fn("Continue anyway? [y/N] ").strip().lower()
+    return answer in ("y", "yes")
+
+
 def _empty_context(shopping_cart_id: str | None = None) -> CartContext:
     return CartContext(
         shopping_cart_id=shopping_cart_id,

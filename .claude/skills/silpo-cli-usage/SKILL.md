@@ -26,7 +26,7 @@ output, it's probably waiting on that browser tab, not crashed.
 
 ## Commands
 
-`silpo-agent {reorder,cart,delivery,clear-context,coupons,favorites-deals,deals}`
+`silpo-agent {reorder,smart-cart,cart,delivery,clear-context,coupons,favorites-deals,deals}`
 
 ### reorder -- place/rebuild the order
 
@@ -47,13 +47,68 @@ uv run silpo-agent reorder --last N --threshold 0-1 [--budget UAH] [--optimize p
   since a bare interactive `reorder` just hangs waiting on stdin.
 - No specifics from user → reasonable default `--last 10 --threshold 0.5`,
   and say that's what was picked.
-- Flow: confirm delivery address → find typical items → check stock,
-  auto-substitute (asks when >1 candidate) → optional promo optimize →
-  **warns before touching a non-empty cart**, decline aborts untouched →
-  optional budget trim → adds to real cart, prints report.
+- Flow: confirm delivery address → resolve cart context, print
+  address/delivery type/timeslot → **if the cart has an error-level
+  validation (e.g. `timeslot.not_found`), warns and asks to continue --
+  decline aborts before any product search**, same as the non-empty-cart
+  guard below → find typical items → check stock, auto-substitute (asks
+  when >1 candidate) → optional promo optimize → **warns before touching a
+  non-empty cart**, decline aborts untouched → optional budget trim → adds
+  to real cart, prints report.
+- If the delivery info printed up front looks stale/wrong (old timeslot,
+  wrong address), run `silpo-agent delivery` first instead of pushing
+  through -- a stale timeslot makes every availability check
+  false-negative, and `--yes` alone won't catch it (see below).
 - Fills cart only. Never checks out or pays -- that's always manual in the
   app or on silpo.ua. If asked to "buy"/"checkout", say `reorder` can't do
   that.
+
+### smart-cart -- reorder, plus discounted favorites and a norm top-up
+
+```bash
+uv run silpo-agent smart-cart --last N --threshold 0-1 [--people N] [--basket-type basic|eco|premium] [--budget UAH] [--yes]
+uv run silpo-agent smart-cart --no-reorder [--people N] [--basket-type basic|eco|premium] [--budget UAH] [--yes]
+```
+- `--no-reorder` skips typical items (order history) entirely -- cart built
+  from favorited-on-discount + norm top-up only. `--last`/`--threshold`
+  aren't needed with this (normally required).
+- Same pipeline as `reorder` (address confirmation, delivery-context
+  validation guard, typical items, substitution, non-empty-cart guard),
+  plus two more sources layered on top, in order:
+  1. Any favorited product currently on discount not already in the
+     resulting cart, deduplicated by product id -- a favorite that's also a
+     typical item is added once, not twice.
+  2. **Norm top-up**: for any grocery category (vegetables, fruits,
+     protein, dairy, grains, pantry, coffee, tea) with no real product-id
+     overlap with what's already going into the cart, proposes the top
+     search result for that category's staple, sized to `--people N`
+     (default 1) × `--basket-type basic|eco|premium` (default `eco`),
+     rounded to a valid add-to-basket step -- for a category-tag/product
+     unit mismatch (a kg/l norm target vs a "шт"/piece-sold product), no
+     kg-to-pack conversion is possible without the pack's real net weight,
+     so it adds 1 unit with a printed note instead of guessing. Shown as
+     its own list with a **separate `[y/N]` confirmation** before joining
+     the cart -- unlike
+     typical items/favorites-deals, which don't get this extra gate since
+     they're known purchases, not guesses.
+- `--last N` / `--threshold 0-1` are **required**, same meaning as
+  `reorder`.
+- `--budget UAH` trims across all three sources when over budget, in
+  priority order: norm top-up items drop first (guesses), then favorited
+  deals, then typical items as the last resort -- same
+  lowest-frequency-first tie-break within a source that `reorder --budget`
+  uses. Counts what's already in the cart against the cap, same as
+  `reorder`.
+- `--yes` / `-y` -- same as `reorder`, plus auto-confirms the norm top-up's
+  own prompt.
+- The report lists all three sources separately ("Added N typical
+  item(s)" / "Added M favorited deal(s)" / "Added K norm item(s)"), and a
+  budget trim's "Trimmed" section is labeled by which source each dropped
+  item came from.
+- Fills cart only, same as `reorder` -- never checks out or pays.
+- Use this instead of `reorder` when the user wants their cart topped up
+  toward a complete grocery basket (by household size/budget tier), not
+  just their exact historical purchases.
 
 ### cart -- show / edit the current real cart
 
@@ -147,6 +202,15 @@ needing a token triggers a fresh browser login. No MCP calls -- never
 touches the real Silpo cart. `--yes`/`-y` skips the confirmation prompt;
 without it the command hangs waiting on stdin, same reasoning as
 `reorder --yes`.
+
+## Before running reorder/smart-cart/cart edit from chat
+
+Run read-only `silpo-agent cart` first (even right after `delivery`, in the
+same conversation) and check its `Validations:` section is clean. Don't
+assume a just-confirmed address/timeslot is still valid. The CLI itself now
+gates on error-level validations (see "Delivery context validation guard"
+above), but checking first avoids running the whole pipeline just to hit
+the gate, and surfaces the actual state to the user before deciding.
 
 ## Past runs / substitution memory
 
