@@ -1,5 +1,7 @@
 # silpo-agent-cli
 
+![silpo-agent-cli](assets/banner.svg)
+
 [![Tests](https://github.com/MIt9/silpo-agent-cli/actions/workflows/test.yml/badge.svg)](https://github.com/MIt9/silpo-agent-cli/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/silpo-agent-cli.svg)](https://pypi.org/project/silpo-agent-cli/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
