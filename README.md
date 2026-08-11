@@ -12,6 +12,8 @@ grocery shopping: rebuild your cart from what you typically buy, check and
 edit what's actually in it, and see what's on sale — without leaving the
 terminal.
 
+**Demo:** watch it in action — [YouTube](https://www.youtube.com/watch?v=2RPE0OwBEzA&t=4s).
+
 **Primary use case: pair it with an AI agent.** This is a plain,
 scriptable CLI on purpose — every command has a stable `--help`, flags do
 one thing, and output carries the product slugs needed for follow-up calls.
