@@ -1,5 +1,10 @@
 from silpo_agent.address_resolver import ResolvedAddress
-from silpo_agent.cart_context import CartContext, confirm_no_blocking_validations, resolve_cart_context
+from silpo_agent.cart_context import (
+    CartContext,
+    confirm_no_blocking_validations,
+    errors_are_only_stale_timeslot,
+    resolve_cart_context,
+)
 
 
 class FakeClient:
@@ -321,3 +326,31 @@ def test_confirm_no_blocking_validations_error_aborts_on_decline():
     proceed = confirm_no_blocking_validations(context, input_fn=lambda prompt="": "n", print_fn=lambda *a: None)
 
     assert proceed is False
+
+
+_STOCK_ERROR = {"level": "error", "type": "product", "message": "product.offer.stock.max", "context": {"productId": "p1"}}
+_STALE_TIMESLOT_ERROR = {"level": "error", "type": "timeslot", "message": "timeslot.not_found", "context": []}
+
+
+def test_errors_are_only_stale_timeslot_false_when_no_errors():
+    context = _context_with_validations([{"level": "warning", "message": "order.adult.is_not_confirmed"}])
+
+    assert errors_are_only_stale_timeslot(context) is False
+
+
+def test_errors_are_only_stale_timeslot_true_when_only_the_timeslot_error():
+    context = _context_with_validations([_STALE_TIMESLOT_ERROR])
+
+    assert errors_are_only_stale_timeslot(context) is True
+
+
+def test_errors_are_only_stale_timeslot_false_when_a_stock_error_is_also_present():
+    context = _context_with_validations([_STALE_TIMESLOT_ERROR, _STOCK_ERROR])
+
+    assert errors_are_only_stale_timeslot(context) is False
+
+
+def test_errors_are_only_stale_timeslot_false_when_only_a_stock_error():
+    context = _context_with_validations([_STOCK_ERROR])
+
+    assert errors_are_only_stale_timeslot(context) is False

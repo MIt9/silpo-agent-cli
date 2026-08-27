@@ -7,21 +7,36 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
 
-CLI wrapper over the Silpo MCP server (`https://mcp.silpo.ua/mcp`) for
-grocery shopping: rebuild your cart from what you typically buy, check and
-edit what's actually in it, and see what's on sale — without leaving the
-terminal.
+Every week the same grocery order: the same milk, the same bread, the same
+"wait, did I add coffee?". This is the tool I wrote so I'd stop retyping it.
+Point it at your Silpo account and it rebuilds the cart from what you
+actually buy, tells you what's on sale, and lets you tweak the result —
+all from the terminal, no app, no clicking through the same list.
 
-**Demo:** watch it in action — [YouTube](https://www.youtube.com/watch?v=2RPE0OwBEzA&t=4s).
+It talks to the official Silpo MCP server (`https://mcp.silpo.ua/mcp`), so
+the cart it fills is your real one. It stops at "cart is ready" — checkout
+and payment stay in your hands.
 
-**Primary use case: pair it with an AI agent.** This is a plain,
-scriptable CLI on purpose — every command has a stable `--help`, flags do
-one thing, and output carries the product slugs needed for follow-up calls.
-Point an agent (e.g. Claude Code) at `.claude/skills/silpo-cli-usage/` and
-it can turn "reorder my usual groceries, budget 1500" into the right
-invocation, read the result, and handle prompts — you don't have to
-memorize flags or babysit the terminal yourself. See
-[Claude Code skills](#claude-code-skills) below.
+*`reorder` — your usual basket, one command:*
+
+![reorder demo](assets/reorder.gif)
+
+*Under the hood — real MCP calls against your real cart:*
+
+![MCP call chain and resulting cart](assets/mcp-cart.gif)
+
+**Full walkthrough:** [YouTube](https://www.youtube.com/watch?v=2RPE0OwBEzA&t=4s).
+
+## Built to hand to an agent
+
+The nicer way to use this is to not use it directly at all. Every command
+has a stable `--help`, every flag does one thing, and every line of output
+carries the product slug you'd need for the next call. Point Claude Code
+(or any agent) at `.claude/skills/silpo-cli-usage/` and "reorder my usual
+groceries, keep it under 1500" becomes the right invocation, the result
+gets read back, and the prompts get answered — without you memorising
+flags or sitting on the terminal waiting for a `[y/N]`. See
+[Claude Code skills](#claude-code-skills).
 
 ## Setup
 
@@ -30,20 +45,20 @@ uvx --from silpo-agent-cli silpo-agent   # run without installing
 pipx install silpo-agent-cli             # or install the `silpo-agent` command
 ```
 
-Developing this repo instead of just using it? Clone it and run `uv sync`
-(see [CONTRIBUTING.md](CONTRIBUTING.md)); use `uv run silpo-agent` in place
-of `silpo-agent` below.
+Hacking on the repo itself? Clone it, `uv sync`, and use `uv run
+silpo-agent` wherever the docs say `silpo-agent` (see
+[CONTRIBUTING.md](CONTRIBUTING.md)).
 
-First run of any command that talks to the MCP server opens a browser for a
-one-time OAuth2.1+PKCE login; the token is cached in the OS keyring
-afterward, so you won't be re-prompted until it expires.
+The first command that needs the server opens a browser once for an
+OAuth2.1+PKCE login. After that the token lives in your OS keyring and you
+won't be asked again until it expires.
 
 ## Commands
 
-Run `silpo-agent --help` for the full list, or `<command> --help`
-for a command's flags and examples. Every command is interactive where it
-matters (address/item confirmation) — run them somewhere you're watching,
-not backgrounded.
+`silpo-agent --help` lists them all; `<command> --help` has the flags and
+worked examples. Anything that asks you to confirm an address or pick a
+substitute is interactive — run those where you can see them, not in the
+background.
 
 ### `reorder` — rebuild the cart from your typical items
 
@@ -69,11 +84,12 @@ consistently, checks they're still in stock, handles substitutions and
   auto-answered prompt is still printed, and the report still lists the
   address used, substitutions made, and items added.
 
-Confirms your delivery address, warns and asks before proceeding if your
-cart's delivery context has a real error (e.g. a stale timeslot), warns
-before touching a non-empty cart, and asks which replacement you want when
-an out-of-stock item has more than one candidate. `--budget` counts what's
-already in the cart (its own payable total) against the cap, not just the
+It won't surprise you: it confirms the delivery address, stops and asks if
+the cart's delivery context is broken (e.g. a stale timeslot), asks before
+adding onto a cart that isn't empty, and asks which replacement you want
+when an out-of-stock item has more than one candidate. `--budget` counts
+what's already in the cart (its own payable total) against the cap, not
+just the
 new items, so reordering onto a non-empty cart can't blow past budget.
 
 ### `smart-cart` — typical items, discounted favorites, and norm top-up
@@ -254,6 +270,8 @@ uv run pytest
   the PR that implemented it linked.
 
 ## Known limitations
+
+Honest list of the rough edges I haven't smoothed out:
 
 - Substitution Resolver's availability check searches by the typical item's
   name when known, otherwise falls back to a raw product-id UUID as the

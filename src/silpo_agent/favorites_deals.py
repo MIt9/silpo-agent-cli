@@ -51,17 +51,12 @@ class FavoriteDeal:
         return line
 
 
-def list_favorites_deals(client, log_store=None, *, input_fn=None, print_fn=None, cart_context=None) -> list[FavoriteDeal]:
-    # Ticket 02 (smart-cart): a caller that already resolved a CartContext of
-    # its own (same pattern as resolve_cart_context's own `resolved_address`,
-    # cart_context.py:44-49) passes it here to skip this redundant
-    # silpo_get_my_shopping_cart/silpo_get_shopping_cart_by_id round trip --
-    # and, on a fresh/cleared cart, avoid re-prompting for address
-    # confirmation a second time. The standalone `favorites-deals` command has
-    # no context of its own, so it omits this and resolves one here as before.
-    if cart_context is None:
-        cart_context = resolve_cart_context(client, log_store=log_store, input_fn=input_fn, print_fn=print_fn)
-
+def fetch_favorite_products(client, cart_context) -> list[dict]:
+    """Raw `silpo_get_my_favorites` product records (same shape as
+    `silpo_get_products`), no discount filter -- `list_favorites_deals` keeps
+    only the discounted ones, but smart-cart's `--fill-to` pool wants the
+    whole favorites list (a known preference beats a random store deal even
+    at full price)."""
     response = (
         client.call(
             "silpo_get_my_favorites",
@@ -73,7 +68,26 @@ def list_favorites_deals(client, log_store=None, *, input_fn=None, print_fn=None
         )
         or {}
     )
-    products = response.get("products") or []
+    return response.get("products") or []
+
+
+def list_favorites_deals(
+    client, log_store=None, *, input_fn=None, print_fn=None, cart_context=None, products=None
+) -> list[FavoriteDeal]:
+    # Ticket 02 (smart-cart): a caller that already resolved a CartContext of
+    # its own (same pattern as resolve_cart_context's own `resolved_address`,
+    # cart_context.py:44-49) passes it here to skip this redundant
+    # silpo_get_my_shopping_cart/silpo_get_shopping_cart_by_id round trip --
+    # and, on a fresh/cleared cart, avoid re-prompting for address
+    # confirmation a second time. The standalone `favorites-deals` command has
+    # no context of its own, so it omits this and resolves one here as before.
+    # `products` lets smart-cart's --fill-to path share the one
+    # `fetch_favorite_products` call it already makes for its fill pool.
+    if cart_context is None:
+        cart_context = resolve_cart_context(client, log_store=log_store, input_fn=input_fn, print_fn=print_fn)
+
+    if products is None:
+        products = fetch_favorite_products(client, cart_context)
 
     deals = []
     for product in products:
