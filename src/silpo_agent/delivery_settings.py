@@ -87,6 +87,15 @@ fails clearly in that case rather than guessing a full postal address from
 scratch, per the same "narrow scope over an unreliable guess" precedent
 issue #20 established for the promo-swap feature.
 
+`keep_address=True` (CLI `--keep-address`): a stale/expired timeslot
+(`timeslot.not_found`) needs only steps 5-6 -- re-pick the timeslot, keeping
+the address and delivery type already on the cart. This skips steps 1 and
+3-4 (no `resolve_address`, no `silpo_get_available_delivery_types`), still
+resolves the `CartContext` (step 2) and reads its `address`/`branch_id`/
+`delivery_type` straight off it, then shares steps 5-6 with the normal path
+via `_apply_delivery_update`. Aborts clearly if the cart has no existing
+address/shipments/branch/deliveryType to reuse.
+
 Post-apply availability report: re-resolves cart context after the update
 and cross-references its `calculation.validations[]` product-level entries
 (`type == "product"`, carrying `context.productId` per docs/mcp_schema.md's
@@ -292,11 +301,25 @@ def _pick_nova_poshta_branch(client, print_fn) -> dict | None:
     return branches[0]
 
 
-def _pick_timeslot(client, branch_id, delivery_type, input_fn, print_fn) -> dict | None:
+def _available_timeslots(client, branch_id, delivery_type) -> list[dict]:
+    """The fetch+filter half of `_pick_timeslot`, factored out so
+    `roll_timeslot_to_nearest` shares it: one real `silpo_get_time_slots`
+    call, filtered client-side to `available: true` slots (the tool's own
+    "Only pick slots where available=true" guidance) and sorted
+    chronologically by `start` -- the schema doesn't promise order, and the
+    interactive "1", `--keep-address --yes`, and `roll_timeslot_to_nearest`
+    all rely on slots[0] being the nearest."""
     response = (
         client.call("silpo_get_time_slots", {"branchId": branch_id, "deliveryTypes": [delivery_type]}) or {}
     )
-    slots = [slot for slot in (response.get("slots") or []) if slot.get("available")]
+    return sorted(
+        (slot for slot in (response.get("slots") or []) if slot.get("available")),
+        key=lambda slot: slot.get("start") or "",
+    )
+
+
+def _pick_timeslot(client, branch_id, delivery_type, input_fn, print_fn) -> dict | None:
+    slots = _available_timeslots(client, branch_id, delivery_type)
     if not slots:
         print_fn("No available timeslots.")
         return None
@@ -322,63 +345,25 @@ def _newly_unavailable(pre_products: list[dict], validations: list[dict]) -> lis
     return [product for product in pre_products if product.get("productId") in flagged_ids]
 
 
-def run_delivery_settings(client, log_store, *, input_fn=None, print_fn=None):
-    input_fn = input_fn or input
-    print_fn = print_fn or print
-
-    resolved_address = resolve_address(client, log_store, input_fn=input_fn, print_fn=print_fn)
-    if resolved_address is None:
-        print_fn("delivery: no delivery address resolved; aborting.")
-        return DeliveryResult(applied=False)
-    if resolved_address.latitude is None or resolved_address.longitude is None:
-        print_fn("delivery: resolved address has no coordinates; aborting.")
-        return DeliveryResult(applied=False)
-
-    # Pass the address we already resolved through so the no-shipments
-    # fallback (issue #29) reuses it instead of prompting a second time.
-    cart_context = resolve_cart_context(client, resolved_address=resolved_address, print_fn=print_fn)
-    if not (cart_context.shopping_cart_id and cart_context.address and cart_context.shipments):
-        print_fn("delivery: no existing cart address/shipments to update from; aborting.")
-        return DeliveryResult(applied=False)
-
-    chosen_type = _pick_delivery_type(resolved_address, input_fn, print_fn)
-    if chosen_type is None:
-        return DeliveryResult(applied=False)
-    delivery_type = chosen_type["deliveryType"]
-
-    if delivery_type == _TARGET_DELIVERY_TYPE:
-        branch_id = chosen_type["branchId"]
-        address = dict(cart_context.address)
-        address["latitude"] = str(resolved_address.latitude)
-        address["longitude"] = str(resolved_address.longitude)
-        shipments = [{**shipment, "branchId": branch_id} for shipment in cart_context.shipments]
-    elif delivery_type == "SelfPickup":
-        branch = _pick_self_pickup_branch(client, resolved_address, input_fn, print_fn)
-        if branch is None:
-            return DeliveryResult(applied=False)
-        branch_id = branch.get("branchId")
-        address = _self_pickup_address(branch)
-        shipments = [
-            {**shipment, "companyId": branch.get("companyId"), "branchId": branch_id}
-            for shipment in cart_context.shipments
-        ]
-    else:  # NovaPoshta
-        settlement = _pick_nova_poshta_settlement(client, input_fn, print_fn)
-        if settlement is None:
-            return DeliveryResult(applied=False)
-        office = _pick_nova_poshta_office(client, settlement, input_fn, print_fn)
-        if office is None:
-            return DeliveryResult(applied=False)
-        np_branch = _pick_nova_poshta_branch(client, print_fn)
-        if np_branch is None:
-            return DeliveryResult(applied=False)
-        branch_id = np_branch.get("branchId")
-        address = _nova_poshta_address(settlement, office)
-        shipments = [
-            {**shipment, "companyId": np_branch.get("companyId"), "branchId": branch_id}
-            for shipment in cart_context.shipments
-        ]
-
+def _apply_delivery_update(
+    client,
+    cart_context,
+    *,
+    delivery_type,
+    branch_id,
+    address,
+    shipments,
+    resolved_address,
+    input_fn,
+    print_fn,
+) -> DeliveryResult:
+    """Shared tail of both `delivery` paths -- the full address -> type ->
+    timeslot walk and the `--keep-address` fast path: pick a real timeslot at
+    `branch_id`/`delivery_type`, apply address + type + timeslot in one
+    `silpo_update_shopping_cart` call, then run the post-apply
+    "newly unavailable" report. `address`/`shipments` are passed verbatim
+    into the update -- each caller builds them its own way (see
+    `run_delivery_settings`)."""
     chosen_slot = _pick_timeslot(client, branch_id, delivery_type, input_fn, print_fn)
     if chosen_slot is None:
         return DeliveryResult(applied=False)
@@ -415,3 +400,173 @@ def run_delivery_settings(client, log_store, *, input_fn=None, print_fn=None):
             print_fn(f"  - {product.get('name') or product.get('productId')}")
 
     return DeliveryResult(applied=True, delivery_type=delivery_type, newly_unavailable=newly_unavailable)
+
+
+def roll_timeslot_to_nearest(client, cart_context, *, print_fn=None) -> DeliveryResult:
+    """Auto-fix a stale/expired timeslot (`timeslot.not_found`) with zero
+    prompts: reuse the address/type/shipments/branch already on the cart
+    (same guard as `--keep-address`'s fast path -- see
+    `run_delivery_settings`) and re-pick the nearest available slot. Called
+    by `reorder`/`smart-cart` (cli.py) once `errors_are_only_stale_timeslot`
+    confirms the timeslot is the sole blocker.
+
+    The nearest slot is `_available_timeslots()[0]` (that helper sorts by
+    `start`). One `silpo_update_shopping_cart` call, same payload shape as
+    `_apply_delivery_update`. No post-apply "newly unavailable" report here:
+    the caller re-resolves the cart context and its downstream pipeline
+    surfaces stock problems on the fresh context. This does not reproduce
+    `delivery`'s full "Now unavailable (N)" report (which also lists
+    warning-level items), but `reorder`/`smart-cart` don't act on that
+    anyway."""
+    print_fn = print_fn or print
+
+    if not (
+        cart_context.shopping_cart_id
+        and cart_context.address
+        and cart_context.shipments
+        and cart_context.delivery_type
+        and cart_context.branch_id
+    ):
+        print_fn("roll timeslot: no existing delivery context to reuse; run plain `delivery`")
+        return DeliveryResult(applied=False)
+
+    slots = [
+        slot
+        for slot in _available_timeslots(client, cart_context.branch_id, cart_context.delivery_type)
+        if slot.get("start") and slot.get("end")
+    ]
+    if not slots:
+        print_fn("roll timeslot: no available timeslots to roll to.")
+        return DeliveryResult(applied=False)
+
+    timeslot = {"start": slots[0]["start"], "end": slots[0]["end"]}
+
+    response = (
+        client.call(
+            "silpo_update_shopping_cart",
+            {
+                "shoppingCartId": cart_context.shopping_cart_id,
+                "deliveryType": cart_context.delivery_type,
+                "timeslot": timeslot,
+                "address": cart_context.address,
+                "shipments": cart_context.shipments,
+            },
+        )
+        or {}
+    )
+    if not response.get("success"):
+        print_fn("roll timeslot: failed to update the timeslot.")
+        return DeliveryResult(applied=False)
+
+    print_fn(f"Stale timeslot -> rolled to nearest available: {format_timeslot(timeslot['start'], timeslot['end'])}")
+    return DeliveryResult(applied=True, delivery_type=cart_context.delivery_type)
+
+
+def run_delivery_settings(client, log_store, *, input_fn=None, print_fn=None, keep_address: bool = False, yes: bool = False):
+    input_fn = input_fn or input
+    print_fn = print_fn or print
+
+    if keep_address:
+        # Fast path for a stale/expired timeslot (timeslot.not_found): the
+        # address and delivery type on the cart are still fine, only the
+        # timeslot needs re-picking. Skip resolve_address entirely (no
+        # address prompt, no silpo_get_available_delivery_types call) and
+        # reuse the cart's own address/type/shipments verbatim.
+        cart_context = resolve_cart_context(client, print_fn=print_fn)
+        if not (
+            cart_context.shopping_cart_id
+            and cart_context.address
+            and cart_context.shipments
+            and cart_context.delivery_type
+            and cart_context.branch_id
+        ):
+            print_fn(
+                "delivery --keep-address: no existing delivery context to reuse; run plain `delivery`"
+            )
+            return DeliveryResult(applied=False)
+        return _apply_delivery_update(
+            client,
+            cart_context,
+            delivery_type=cart_context.delivery_type,
+            branch_id=cart_context.branch_id,
+            address=cart_context.address,
+            shipments=cart_context.shipments,
+            resolved_address=None,
+            input_fn=input_fn,
+            print_fn=print_fn,
+        )
+
+    resolved_address = resolve_address(client, log_store, input_fn=input_fn, print_fn=print_fn)
+    if resolved_address is None:
+        print_fn("delivery: no delivery address resolved; aborting.")
+        return DeliveryResult(applied=False)
+    if resolved_address.latitude is None or resolved_address.longitude is None:
+        print_fn("delivery: resolved address has no coordinates; aborting.")
+        return DeliveryResult(applied=False)
+
+    # Pass the address we already resolved through so the no-shipments
+    # fallback (issue #29) reuses it instead of prompting a second time.
+    cart_context = resolve_cart_context(client, resolved_address=resolved_address, print_fn=print_fn)
+    if not (cart_context.shopping_cart_id and cart_context.address and cart_context.shipments):
+        print_fn("delivery: no existing cart address/shipments to update from; aborting.")
+        return DeliveryResult(applied=False)
+
+    chosen_type = _pick_delivery_type(resolved_address, input_fn, print_fn)
+    if chosen_type is None:
+        return DeliveryResult(applied=False)
+    delivery_type = chosen_type["deliveryType"]
+
+    if yes and delivery_type == "NovaPoshta":
+        # NovaPoshta needs a free-text settlement search -- _auto_yes_input_fn
+        # can't answer that. DeliveryHome/SelfPickup are numbered picks and
+        # work fine non-interactively.
+        print_fn(
+            "delivery --yes only supports DeliveryHome/SelfPickup non-interactively; "
+            "for NovaPoshta run 'delivery' interactively"
+        )
+        return DeliveryResult(applied=False)
+
+    if delivery_type == _TARGET_DELIVERY_TYPE:
+        branch_id = chosen_type["branchId"]
+        address = dict(cart_context.address)
+        address["latitude"] = str(resolved_address.latitude)
+        address["longitude"] = str(resolved_address.longitude)
+        shipments = [{**shipment, "branchId": branch_id} for shipment in cart_context.shipments]
+    elif delivery_type == "SelfPickup":
+        branch = _pick_self_pickup_branch(client, resolved_address, input_fn, print_fn)
+        if branch is None:
+            return DeliveryResult(applied=False)
+        branch_id = branch.get("branchId")
+        address = _self_pickup_address(branch)
+        shipments = [
+            {**shipment, "companyId": branch.get("companyId"), "branchId": branch_id}
+            for shipment in cart_context.shipments
+        ]
+    else:  # NovaPoshta
+        settlement = _pick_nova_poshta_settlement(client, input_fn, print_fn)
+        if settlement is None:
+            return DeliveryResult(applied=False)
+        office = _pick_nova_poshta_office(client, settlement, input_fn, print_fn)
+        if office is None:
+            return DeliveryResult(applied=False)
+        np_branch = _pick_nova_poshta_branch(client, print_fn)
+        if np_branch is None:
+            return DeliveryResult(applied=False)
+        branch_id = np_branch.get("branchId")
+        address = _nova_poshta_address(settlement, office)
+        shipments = [
+            {**shipment, "companyId": np_branch.get("companyId"), "branchId": branch_id}
+            for shipment in cart_context.shipments
+        ]
+
+    return _apply_delivery_update(
+        client,
+        cart_context,
+        delivery_type=delivery_type,
+        branch_id=branch_id,
+        address=address,
+        shipments=shipments,
+        resolved_address=resolved_address,
+        input_fn=input_fn,
+        print_fn=print_fn,
+    )

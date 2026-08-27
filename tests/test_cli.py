@@ -1,5 +1,16 @@
-from silpo_agent.cli import main
+from silpo_agent.cli import _auto_yes_input_fn, main
 from silpo_agent.log_store import ReorderLogStore
+
+
+def test_auto_yes_input_fn_picks_first_option_for_address_resolver_prompt():
+    """address_resolver.py's numbered pick is "Pick a number, or type a new
+    address: " -- the auto-yes fn must answer it "1" (pick the first saved
+    address), not "y" (which resolve_address would treat as a free-text
+    address query)."""
+    input_fn = _auto_yes_input_fn(lambda *a: None)
+    assert input_fn("Pick a number, or type a new address: ") == "1"
+    assert input_fn("Pick a number: ") == "1"
+    assert input_fn("Deliver to Home? [Y/n] ") == "y"
 
 
 def _available_batch(*product_ids):
@@ -547,9 +558,10 @@ def test_reorder_aborts_on_declined_validation_error(capsys, monkeypatch, tmp_pa
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
-    # First prompt is the address confirmation ("Deliver to X? [Y/n]") --
-    # confirm it, then decline the validation-error gate that follows.
-    answers = iter(["y", "n"])
+    # Prompts: address confirmation ("Deliver to X? [Y/n]") -- confirm it;
+    # the stale-timeslot roll offer -- decline it (this fixture's cart has no
+    # address to roll against anyway); then decline the validation-error gate.
+    answers = iter(["y", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
 
     exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
@@ -583,6 +595,190 @@ def test_reorder_yes_flag_auto_confirms_validation_error(capsys, monkeypatch, tm
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "timeslot.not_found" in out
+    assert any(call[0] == "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+_TIMESLOT_ERR = {"level": "error", "type": "timeslot", "message": "timeslot.not_found", "context": []}
+_STOCK_ERR = {"level": "error", "type": "product", "message": "product.offer.stock.max", "context": {"productId": "milk"}}
+
+
+def _stale_cart(validations, *, with_address=True):
+    cart = {
+        "deliveryType": "DeliveryHome",
+        "timeslot": {"start": "2026-08-04T10:00:00", "end": "2026-08-04T12:00:00"},
+        "shipments": [{"id": "ship-1", "companyId": "c1", "branchId": "b1", "products": []}],
+        "calculation": {"validations": validations},
+    }
+    if with_address:
+        cart["address"] = {"addressType": "flat", "latitude": "49.24", "longitude": "28.48", "city": "Kyiv"}
+    return {"success": True, "cart": cart, "loyalty": {}}
+
+
+def _stale_cart_responses(validations):
+    return {
+        "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+        "silpo_get_shopping_cart_by_id": _stale_cart(validations),
+    }
+
+
+class _SequencedCartClient(FakeClient):
+    """FakeClient that returns a different silpo_get_shopping_cart_by_id per
+    call -- a stale-timeslot cart first, then a fresh one once the auto-roll
+    has re-resolved. The base FakeClient keys only by tool name."""
+
+    def __init__(self, responses, carts):
+        super().__init__(responses)
+        self._carts = list(carts)
+
+    def call(self, tool, args=None):
+        self.calls.append((tool, args))
+        if tool == "silpo_get_shopping_cart_by_id":
+            return self._carts.pop(0) if len(self._carts) > 1 else self._carts[0]
+        return self.responses.get(tool)
+
+
+def _roll_reorder_responses():
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
+    return {
+        "silpo_get_my_online_orders": orders,
+        "silpo_get_my_delivery_addresses": [
+            {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
+        ],
+        "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+        "silpo_find_products_batch": _available_batch("milk"),
+        "silpo_get_time_slots": {
+            "success": True,
+            "slots": [{"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00", "available": True}],
+        },
+        "silpo_update_shopping_cart": {"success": True},
+    }
+
+
+def test_reorder_yes_auto_rolls_stale_timeslot_then_proceeds_to_product_search(capsys, tmp_path):
+    """(1) reorder --yes on a stale-timeslot-only cart: roll to the nearest
+    slot automatically (no prompt), re-resolve, then run product search and
+    fill the cart."""
+    client = _SequencedCartClient(_roll_reorder_responses(), carts=[_stale_cart([_TIMESLOT_ERR]), _stale_cart([])])
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0", "--yes"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "rolled to nearest available" in out
+    assert (
+        "silpo_update_shopping_cart",
+        {
+            "shoppingCartId": "cart-1",
+            "deliveryType": "DeliveryHome",
+            "timeslot": {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00"},
+            "address": {"addressType": "flat", "latitude": "49.24", "longitude": "28.48", "city": "Kyiv"},
+            "shipments": [{"id": "ship-1", "companyId": "c1", "branchId": "b1", "products": []}],
+        },
+    ) in client.calls
+    assert any(call[0] == "silpo_find_products_batch" for call in client.calls)
+    assert any(call[0] == "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_reorder_interactive_accepts_the_stale_timeslot_roll(capsys, monkeypatch, tmp_path):
+    """(2) interactive reorder: the roll offer appears, the user accepts it,
+    the re-resolved (fresh) context clears the gate, product search runs."""
+    client = _SequencedCartClient(_roll_reorder_responses(), carts=[_stale_cart([_TIMESLOT_ERR]), _stale_cart([])])
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    prompts = []
+    answers = iter(["y", "y"])  # address-confirm, accept the roll
+
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert any("nearest available" in p for p in prompts)
+    assert "rolled to nearest available" in out
+    assert any(call[0] == "silpo_update_shopping_cart" for call in client.calls)
+    assert any(call[0] == "silpo_add_or_update_cart_products" for call in client.calls)
+
+
+def test_reorder_interactive_declines_roll_falls_through_to_existing_gate(capsys, monkeypatch, tmp_path):
+    """(3) interactive reorder: user declines the roll -> the run falls back
+    to the unchanged confirm_no_blocking_validations gate, exactly as today."""
+    client = FakeClient(
+        {
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
+            ],
+            "silpo_find_products_batch": _available_batch("milk"),
+            **_stale_cart_responses([_TIMESLOT_ERR]),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    prompts = []
+    answers = iter(["y", "n", "n"])  # address-confirm, decline roll, decline gate
+
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert any("nearest available" in p for p in prompts)
+    assert "cart validation error" in out
+    assert "Aborted" in out
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+    assert all(call[0] != "silpo_get_time_slots" for call in client.calls)
+
+
+def test_reorder_stale_timeslot_plus_stock_error_skips_roll_and_hits_gate(capsys, monkeypatch, tmp_path):
+    """(4) a non-timeslot error alongside the stale timeslot -> the roll is
+    never offered, the existing gate fires as before."""
+    client = FakeClient(
+        {
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
+            ],
+            **_stale_cart_responses([_TIMESLOT_ERR, _STOCK_ERR]),
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    prompts = []
+    answers = iter(["y", "n"])  # address-confirm, decline the gate (no roll offer in between)
+
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    exit_code = main(["reorder", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert not any("nearest available" in p for p in prompts)
+    assert "cart validation error" in out
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+    assert all(call[0] != "silpo_get_time_slots" for call in client.calls)
+
+
+def test_smart_cart_yes_auto_rolls_stale_timeslot_then_proceeds(capsys, tmp_path):
+    """(5) same auto-roll for smart-cart --yes."""
+    client = _SequencedCartClient(_roll_reorder_responses(), carts=[_stale_cart([_TIMESLOT_ERR]), _stale_cart([])])
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(["smart-cart", "--last", "1", "--threshold", "1.0", "--yes"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "rolled to nearest available" in out
+    assert any(call[0] == "silpo_update_shopping_cart" for call in client.calls)
     assert any(call[0] == "silpo_add_or_update_cart_products" for call in client.calls)
 
 
@@ -908,7 +1104,8 @@ def test_smart_cart_aborts_on_declined_validation_error(capsys, monkeypatch, tmp
         }
     )
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
-    answers = iter(["y", "n"])
+    # address-confirm, decline the stale-timeslot roll offer, decline the gate.
+    answers = iter(["y", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
 
     exit_code = main(["smart-cart", "--last", "1", "--threshold", "1.0"], client=client, log_store=log_store)
@@ -1660,6 +1857,317 @@ def test_smart_cart_budget_under_budget_trims_nothing(capsys, monkeypatch, tmp_p
     assert "Total: 114.90" in out
 
 
+def _fill_to_client(orders, deal_products, favorites=None):
+    """FakeClient for a --fill-to run: typical items via order history +
+    availability batch, plus a single promo category whose products (passed
+    as raw discounted dicts) drive `scan_deals`, plus an optional raw
+    favorites list (`silpo_get_my_favorites`) for the priority-1 fill pool."""
+    responses = {
+        "silpo_get_my_online_orders": orders,
+        "silpo_get_my_delivery_addresses": [
+            {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
+        ],
+        "silpo_find_products_batch": _available_batch("milk"),
+        "silpo_get_promotions": {"success": True, "promotions": [{"code": "deals", "title": "Deals"}]},
+        "silpo_get_products": {"success": True, "products": deal_products},
+        **_resolved_cart_context(),
+    }
+    if favorites is not None:
+        responses["silpo_get_my_favorites"] = {
+            "success": True,
+            "summary": f"Found {len(favorites)} favorites",
+            "products": favorites,
+        }
+    return FakeClient(responses)
+
+
+def test_smart_cart_fill_to_picks_deals_in_discount_order_until_next_wont_fit(capsys, monkeypatch, tmp_path):
+    """Happy path: sparse cart (milk, 45) + low projected against a 100
+    target, no favorites. Deals are scanned by discount % desc: cheese
+    (-70%, 30), wine (-33%, 40), nuts (-17%, 25). cheese fits (45+30=75);
+    wine doesn't (75+40=115>100) but the scan continues; nuts still fits
+    (75+25=100). Both fill items fold into the one write_cart call and get
+    their own report section, tagged [deal]."""
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
+    client = _fill_to_client(
+        orders,
+        [
+            {"id": "cheese", "name": "Cheese", "price": 30.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"},
+            {"id": "wine", "name": "Wine", "price": 40.0, "oldPrice": 60.0, "companyId": "c1", "branchId": "b1"},
+            {"id": "nuts", "name": "Nuts", "price": 25.0, "oldPrice": 30.0, "companyId": "c1", "branchId": "b1"},
+        ],
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "100"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Filling toward 100.00:" in out
+    assert "Added 2 fill-to-budget item(s):" in out
+    assert "  - [deal] cheese: 30.00" in out
+    assert "  - [deal] nuts: 25.00" in out
+    add_calls = [call for call in client.calls if call[0] == "silpo_add_or_update_cart_products"]
+    assert len(add_calls) == 1
+    assert [p["productId"] for p in add_calls[0][1]["products"]] == ["milk", "cheese", "nuts"]
+
+
+def test_smart_cart_fill_to_pulls_favorite_before_store_deal_and_short_circuits_scan(capsys, monkeypatch, tmp_path):
+    """Priority order + scan short-circuit: a favorited product at full
+    price (yogurt, 25, no oldPrice) is taken before the store deal, and
+    because it reaches the target exactly (milk 45 + yogurt 25 = 70) the
+    store-wide deal scan (`silpo_get_promotions`) is never fired."""
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
+    client = _fill_to_client(
+        orders,
+        [{"id": "cheese", "name": "Cheese", "price": 20.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"}],
+        favorites=[{"id": "yogurt", "name": "Yogurt", "price": 25.0}],
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "70"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Added 1 fill-to-budget item(s):" in out
+    assert "  - [fav] yogurt: 25.00" in out
+    assert "cheese" not in out.lower()
+    assert all(call[0] != "silpo_get_promotions" for call in client.calls)
+    assert sum(1 for call in client.calls if call[0] == "silpo_get_my_favorites") == 1
+    add_calls = [call for call in client.calls if call[0] == "silpo_add_or_update_cart_products"]
+    assert [p["productId"] for p in add_calls[0][1]["products"]] == ["milk", "yogurt"]
+
+
+def test_smart_cart_fill_to_already_at_target_adds_no_fill_items_but_still_writes(capsys, monkeypatch, tmp_path):
+    """projected (milk, 45) already >= a 30 target: the "Already at" line is
+    printed, no deals are scanned, zero fill items -- but the normal write
+    (milk) still happens."""
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
+    client = _fill_to_client(
+        orders,
+        [{"id": "cheese", "name": "Cheese", "price": 30.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"}],
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "30"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Already at 45.00 of 30.00 target; nothing to fill." in out
+    assert "Added 0 fill-to-budget item(s):" in out
+    assert all(call[0] != "silpo_get_promotions" for call in client.calls)
+    add_calls = [call for call in client.calls if call[0] == "silpo_add_or_update_cart_products"]
+    assert len(add_calls) == 1
+    assert [p["productId"] for p in add_calls[0][1]["products"]] == ["milk"]
+
+
+def test_smart_cart_fill_to_skips_favorites_and_deals_already_in_cart_or_pending(capsys, monkeypatch, tmp_path):
+    """Dedup across both pool sources: a favorite that's a pending typical
+    item (milk) or already a cart line (eggs), and a store deal for the same
+    (milk/eggs), are all skipped -- only the fresh deal (cheese) is
+    offered."""
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
+    client = _fill_to_client(
+        orders,
+        [
+            {"id": "eggs", "name": "Eggs", "price": 15.0, "oldPrice": 40.0, "companyId": "c1", "branchId": "b1"},
+            {"id": "milk", "name": "Milk", "price": 20.0, "oldPrice": 45.0, "companyId": "c1", "branchId": "b1"},
+            {"id": "cheese", "name": "Cheese", "price": 30.0, "oldPrice": 60.0, "companyId": "c1", "branchId": "b1"},
+        ],
+        favorites=[
+            {"id": "milk", "name": "Milk", "price": 10.0},
+            {"id": "eggs", "name": "Eggs", "price": 12.0},
+        ],
+    )
+    client.responses["silpo_get_shopping_cart_by_id"]["cart"]["shipments"][0]["products"] = [
+        {"productId": "eggs", "name": "Eggs", "quantity": 1, "price": 20.0}
+    ]
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "200"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Added 1 fill-to-budget item(s):" in out
+    assert "  - [deal] cheese: 30.00" in out
+    fill_section = out.split("Filling toward")[1].split("Added ")[0]
+    assert "eggs" not in fill_section.lower()
+    assert "milk" not in fill_section.lower()
+    add_calls = [call for call in client.calls if call[0] == "silpo_add_or_update_cart_products"]
+    assert [p["productId"] for p in add_calls[0][1]["products"]] == ["milk", "cheese"]
+
+
+def test_smart_cart_fill_to_and_budget_are_mutually_exclusive(capsys, tmp_path):
+    client = FakeClient({})
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "100", "--budget", "50"],
+        client=client,
+        log_store=log_store,
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "mutually exclusive" in out
+    assert client.calls == []
+
+
+def test_smart_cart_fill_to_yes_flag_auto_confirms_the_fill_gate(capsys, monkeypatch, tmp_path):
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
+    client = _fill_to_client(
+        orders,
+        [{"id": "cheese", "name": "Cheese", "price": 30.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"}],
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    def fail_input(prompt=""):
+        raise AssertionError("input() should never be called with --yes")
+
+    monkeypatch.setattr("builtins.input", fail_input)
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "100", "--yes"],
+        client=client,
+        log_store=log_store,
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Added 1 fill-to-budget item(s):" in out
+    assert "  - [deal] cheese: 30.00" in out
+
+
+def test_smart_cart_fill_to_declined_gate_adds_nothing_from_fill(capsys, monkeypatch, tmp_path):
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
+    client = _fill_to_client(
+        orders,
+        [{"id": "cheese", "name": "Cheese", "price": 30.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"}],
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    def fake_input(prompt=""):
+        return "n" if "fill-to-budget" in prompt.lower() else "y"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "100"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Added 0 fill-to-budget item(s):" in out
+    assert "Added 1 typical item(s):" in out
+    add_calls = [call for call in client.calls if call[0] == "silpo_add_or_update_cart_products"]
+    assert [p["productId"] for p in add_calls[0][1]["products"]] == ["milk"]
+
+
+def test_smart_cart_fill_to_projected_counts_pending_quantity(capsys, monkeypatch, tmp_path):
+    """`projected` must bill price*quantity: milk is bought 3x per order, so
+    the pending line is 45*3=135, not 45. Against a 150 target that leaves
+    only 15 -- cheese (30) must NOT fit, only mints (10) does. With the old
+    quantity-blind projected (45) cheese would have been wrongly taken."""
+    orders = [
+        {"products": [{"id": "milk", "price": 45.0, "quantity": 3, "removed": False, "companyId": "c1", "branchId": "b1"}]}
+    ]
+    client = _fill_to_client(
+        orders,
+        [
+            {"id": "cheese", "name": "Cheese", "price": 30.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"},
+            {"id": "mints", "name": "Mints", "price": 10.0, "oldPrice": 20.0, "companyId": "c1", "branchId": "b1"},
+        ],
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "150"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Added 1 fill-to-budget item(s):" in out
+    assert "  - [deal] mints: 10.00" in out
+    assert "cheese" not in out.lower()
+    assert "Reached 145.00 of 150.00 target (1 item(s) fit; pool exhausted)." in out
+    add_calls = [call for call in client.calls if call[0] == "silpo_add_or_update_cart_products"]
+    milk_line = next(p for p in add_calls[0][1]["products"] if p["productId"] == "milk")
+    assert milk_line["quantity"] == 3
+    assert [p["productId"] for p in add_calls[0][1]["products"]] == ["milk", "mints"]
+
+
+def test_smart_cart_fill_to_reports_how_far_it_got_when_pool_exhausted(capsys, monkeypatch, tmp_path):
+    """Pool runs out before the target: after taking cheese (30), nothing
+    else is available, so an explicit "Reached ... pool exhausted" line
+    tells the user how close the fill got."""
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
+    client = _fill_to_client(
+        orders,
+        [{"id": "cheese", "name": "Cheese", "price": 30.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"}],
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "500"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Reached 75.00 of 500.00 target (1 item(s) fit; pool exhausted)." in out
+    assert "Added 1 fill-to-budget item(s):" in out
+
+
+def test_smart_cart_fill_to_prints_explicit_line_when_nothing_fits(capsys, monkeypatch, tmp_path):
+    """No pool item fits under the (tight) target -- the user gets an
+    explicit "no fill items found" line, not just a bare "Added 0"."""
+    orders = [{"products": [{"id": "milk", "price": 45.0, "removed": False, "companyId": "c1", "branchId": "b1"}]}]
+    client = _fill_to_client(
+        orders,
+        [{"id": "cheese", "name": "Cheese", "price": 30.0, "oldPrice": 100.0, "companyId": "c1", "branchId": "b1"}],
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "60"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "No fill items found for the 60.00 target (still at 45.00)." in out
+    assert "Added 0 fill-to-budget item(s):" in out
+    add_calls = [call for call in client.calls if call[0] == "silpo_add_or_update_cart_products"]
+    assert [p["productId"] for p in add_calls[0][1]["products"]] == ["milk"]
+
+
+def test_smart_cart_fill_to_must_be_positive(capsys, tmp_path):
+    client = FakeClient({})
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["smart-cart", "--last", "1", "--threshold", "1.0", "--fill-to", "0"], client=client, log_store=log_store
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "must be a positive number" in out
+    assert client.calls == []
+
+
 def test_clear_context_confirm_wipes_runs_and_substitutions(capsys, tmp_path):
     log_store = ReorderLogStore(tmp_path / "reorder_log.json")
     log_store.append_run({"timestamp": "t", "items_added": ["milk"], "substitutions": {}, "address": "A", "total": 10})
@@ -2106,6 +2614,135 @@ def test_delivery_invalid_selection_exits_nonzero_without_update_call(tmp_path):
     )
 
     assert exit_code == 1
+
+
+def test_delivery_keep_address_flag_skips_address_and_type_prompts(tmp_path):
+    client = FakeClient(_delivery_fixture_responses())
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    answers = iter(["1"])  # only prompt reached: pick the timeslot
+
+    exit_code = main(
+        ["delivery", "--keep-address"], client=client, log_store=log_store,
+        input_fn=lambda prompt="": next(answers), print_fn=lambda *a: None,
+    )
+
+    assert exit_code == 0
+    assert any(call[0] == "silpo_update_shopping_cart" for call in client.calls)
+    assert all(call[0] != "silpo_get_my_delivery_addresses" for call in client.calls)
+    assert all(call[0] != "silpo_get_available_delivery_types" for call in client.calls)
+
+
+def _no_prompt_input_fn(prompt=""):
+    raise AssertionError(f"prompt reached under --yes: {prompt!r}")
+
+
+def test_delivery_yes_runs_fully_non_interactively(tmp_path):
+    """delivery --yes: address confirm, delivery type, and timeslot are all
+    auto-answered (first/nearest) and echoed -- no prompt reaches input_fn."""
+    client = FakeClient(_delivery_fixture_responses())
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    printed = []
+
+    exit_code = main(
+        ["delivery", "--yes"], client=client, log_store=log_store,
+        input_fn=_no_prompt_input_fn, print_fn=lambda *a: printed.append(" ".join(str(x) for x in a)),
+    )
+
+    assert exit_code == 0
+    assert any(call[0] == "silpo_update_shopping_cart" for call in client.calls)
+    assert any("Pick a delivery type by number:" in line for line in printed)
+    assert any("Pick a timeslot by number:" in line for line in printed)
+
+
+def test_delivery_keep_address_yes_picks_nearest_slot_with_no_prompts(tmp_path):
+    """delivery --keep-address --yes = one-shot roll of a stale timeslot to
+    the nearest available, reusing the cart's own address/type."""
+    responses = _delivery_fixture_responses()
+    responses["silpo_get_time_slots"] = {
+        "success": True,
+        "slots": [
+            {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00", "available": True},
+            {"start": "2026-08-06T14:00:00", "end": "2026-08-06T16:00:00", "available": True},
+        ],
+    }
+    client = FakeClient(responses)
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["delivery", "--keep-address", "--yes"], client=client, log_store=log_store,
+        input_fn=_no_prompt_input_fn, print_fn=lambda *a: None,
+    )
+
+    assert exit_code == 0
+    update_calls = [args for tool, args in client.calls if tool == "silpo_update_shopping_cart"]
+    assert len(update_calls) == 1
+    assert update_calls[0]["timeslot"] == {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00"}
+    assert all(call[0] != "silpo_get_my_delivery_addresses" for call in client.calls)
+    assert all(call[0] != "silpo_get_available_delivery_types" for call in client.calls)
+
+
+def test_delivery_yes_bails_cleanly_when_delivery_option_1_is_nova_poshta(tmp_path):
+    """`--yes` picks option 1; if that's NovaPoshta (needs a free-text
+    settlement search) the run bails with a clear message before any NP
+    call, rather than feeding "y" into the search."""
+    responses = _delivery_fixture_responses()
+    responses["silpo_get_available_delivery_types"] = {
+        "success": True,
+        "summary": "Found 1 delivery options",
+        "options": [{"deliveryType": "NovaPoshta", "branchId": None, "description": "Nova Poshta"}],
+    }
+    client = FakeClient(responses)
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+    printed = []
+
+    exit_code = main(
+        ["delivery", "--yes"], client=client, log_store=log_store,
+        input_fn=_no_prompt_input_fn, print_fn=lambda *a: printed.append(" ".join(str(x) for x in a)),
+    )
+
+    assert exit_code == 1
+    assert any("NovaPoshta" in line and "interactive" in line for line in printed)
+    assert all(call[0] != "silpo_find_nova_poshta_settlements" for call in client.calls)
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+
+
+def test_delivery_yes_aborts_loudly_on_free_text_address_prompt(capsys, tmp_path):
+    """No saved addresses -> resolve_address reaches the free-text "Enter a
+    delivery address: " prompt. Under --yes that raises, caught in main:
+    stderr message naming the prompt, exit 1, no garbage silpo_find_address."""
+    responses = _delivery_fixture_responses()
+    responses["silpo_get_my_delivery_addresses"] = []
+    client = FakeClient(responses)
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(["delivery", "--yes"], client=client, log_store=log_store, print_fn=lambda *a: None)
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "cannot auto-answer prompt" in err
+    assert "Enter a delivery address" in err
+    assert all(call[0] != "silpo_find_address" for call in client.calls)
+
+
+def test_reorder_yes_aborts_loudly_on_free_text_address_prompt(capsys, tmp_path):
+    """Same free-text hardening for `reorder --yes`: no saved addresses ->
+    loud stderr abort, not a `silpo_find_address({"address": "y"})` call."""
+    client = FakeClient(
+        {
+            "silpo_get_my_delivery_addresses": [],
+            "silpo_get_my_online_orders": [{"products": []}],
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(
+        ["reorder", "--last", "1", "--threshold", "1.0", "--yes"], client=client, log_store=log_store
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "cannot auto-answer prompt" in err
+    assert all(call[0] != "silpo_find_address" for call in client.calls)
 
 
 def _cart_with_products(*products):

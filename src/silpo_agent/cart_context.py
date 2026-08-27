@@ -107,6 +107,23 @@ def confirm_no_blocking_validations(cart_context: CartContext, *, input_fn=None,
     return answer in ("y", "yes")
 
 
+_STALE_TIMESLOT_MESSAGE = "timeslot.not_found"
+
+
+def errors_are_only_stale_timeslot(cart_context: CartContext) -> bool:
+    """True iff the cart has at least one error-level validation and every
+    one of them is the stale/expired-timeslot error. Real shape per
+    docs/mcp_schema.md (live-verified): `{"level": "error", "type":
+    "timeslot", "message": "timeslot.not_found", "context": []}` -- there's
+    no `code` field, so this keys on `message`. Lets `reorder`/`smart-cart`
+    offer an automatic nearest-slot roll when the timeslot is the *only*
+    blocker; any other error (e.g. an out-of-stock `product.offer.stock.max`)
+    makes this False, so the run still falls through to the manual
+    `confirm_no_blocking_validations` gate unchanged."""
+    errors = [v for v in cart_context.validations if v.get("level") == "error"]
+    return bool(errors) and all(v.get("message") == _STALE_TIMESLOT_MESSAGE for v in errors)
+
+
 def _empty_context(shopping_cart_id: str | None = None) -> CartContext:
     return CartContext(
         shopping_cart_id=shopping_cart_id,

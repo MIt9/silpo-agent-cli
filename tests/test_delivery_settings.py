@@ -1,4 +1,4 @@
-from silpo_agent.delivery_settings import run_delivery_settings
+from silpo_agent.delivery_settings import roll_timeslot_to_nearest, run_delivery_settings
 
 
 class FakeClient:
@@ -192,6 +192,221 @@ def test_happy_path_end_to_end_applies_delivery_settings():
     ) in client.calls
     # Only the available slot must be choosable -- the unavailable one filtered out before prompting.
     assert client.calls.count(("silpo_get_time_slots", {"branchId": "new-branch", "deliveryTypes": ["DeliveryHome"]})) == 1
+
+
+def test_keep_address_reuses_context_and_only_repicks_timeslot():
+    """--keep-address fast path: skip resolve_address and the delivery-type
+    listing entirely, reuse the address/type/shipments already on the cart
+    verbatim, and only re-pick the timeslot -- for a stale timeslot
+    (timeslot.not_found) where the address is still right."""
+    responses = _base_responses(
+        silpo_get_shopping_cart_by_id=[
+            cart_by_id_response(),  # keep-address context resolve
+            cart_by_id_response(),  # post-apply re-resolve
+        ]
+    )
+    client = FakeClient(responses)
+    log_store = FakeLogStore()
+    input_fn = make_input("1")  # the only prompt reached: pick timeslot #1
+
+    result = run_delivery_settings(
+        client, log_store, input_fn=input_fn, print_fn=lambda *a: None, keep_address=True
+    )
+
+    assert result.applied is True
+    assert result.delivery_type == "DeliveryHome"
+    assert all(call[0] != "silpo_get_my_delivery_addresses" for call in client.calls)
+    assert all(call[0] != "silpo_get_available_delivery_types" for call in client.calls)
+    assert (
+        "silpo_update_shopping_cart",
+        {
+            "shoppingCartId": "cart-1",
+            "deliveryType": "DeliveryHome",
+            "timeslot": {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00"},
+            "address": {
+                "addressType": "flat",
+                "latitude": "49.24",
+                "longitude": "28.48",
+                "city": "Вінниця",
+                "street": "Варшавська вулиця",
+                "house": "27",
+            },
+            "shipments": [{"id": "ship-1", "companyId": "c1", "branchId": "old-branch", "products": []}],
+        },
+    ) in client.calls
+    # timeslot re-picked at the cart's own existing branch, not a freshly resolved one
+    assert (
+        client.calls.count(("silpo_get_time_slots", {"branchId": "old-branch", "deliveryTypes": ["DeliveryHome"]})) == 1
+    )
+
+
+def test_keep_address_with_no_existing_context_aborts_without_mutation():
+    """Empty cart / no established delivery context -> nothing to reuse.
+    Abort cleanly, pointing at plain `delivery`, and make no MCP mutation
+    call (and never prompt)."""
+    client = FakeClient({"silpo_get_my_shopping_cart": {"success": True}})  # no shoppingCartId
+    log_store = FakeLogStore()
+    printed = []
+
+    result = run_delivery_settings(
+        client,
+        log_store,
+        input_fn=make_input(),  # StopIteration if a prompt is reached
+        print_fn=lambda *a: printed.append(" ".join(str(x) for x in a)),
+        keep_address=True,
+    )
+
+    assert result.applied is False
+    assert all(call[0] != "silpo_get_time_slots" for call in client.calls)
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+    assert "keep-address" in "\n".join(printed)
+
+
+def test_keep_address_with_cart_but_no_delivery_type_aborts_without_mutation():
+    """Realistic degraded cart: a shoppingCartId exists but the cart has no
+    established delivery type yet -> nothing to reuse, abort cleanly."""
+    responses = _base_responses(
+        silpo_get_shopping_cart_by_id=[cart_by_id_response(delivery_type=None)]
+    )
+    client = FakeClient(responses)
+    log_store = FakeLogStore()
+
+    result = run_delivery_settings(
+        client, log_store, input_fn=make_input(), print_fn=lambda *a: None, keep_address=True
+    )
+
+    assert result.applied is False
+    assert all(call[0] != "silpo_get_time_slots" for call in client.calls)
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+
+
+def test_keep_address_with_shipment_missing_branch_id_aborts_without_mutation():
+    """A shipment present but with no branchId can't be reused -- the guard
+    checks cart_context.branch_id (computed defensively by
+    resolve_cart_context), so this aborts cleanly instead of KeyError-ing on
+    a bare shipments[0]["branchId"] subscript."""
+    responses = _base_responses(
+        silpo_get_shopping_cart_by_id=[
+            cart_by_id_response(shipments=[{"id": "ship-1", "companyId": "c1", "products": []}])
+        ]
+    )
+    client = FakeClient(responses)
+    log_store = FakeLogStore()
+
+    result = run_delivery_settings(
+        client, log_store, input_fn=make_input(), print_fn=lambda *a: None, keep_address=True
+    )
+
+    assert result.applied is False
+    assert all(call[0] != "silpo_get_time_slots" for call in client.calls)
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+
+
+def _roll_context(**overrides):
+    from silpo_agent.cart_context import CartContext
+
+    base = {
+        "shopping_cart_id": "cart-1",
+        "branch_id": "old-branch",
+        "company_id": "c1",
+        "delivery_type": "DeliveryHome",
+        "timeslot_start": None,
+        "timeslot_end": None,
+        "address": {"addressType": "flat", "latitude": "49.24", "longitude": "28.48", "city": "Вінниця"},
+        "shipments": [{"id": "ship-1", "companyId": "c1", "branchId": "old-branch", "products": []}],
+    }
+    return CartContext(**{**base, **overrides})
+
+
+def test_roll_timeslot_to_nearest_applies_the_earliest_available_slot():
+    """Happy roll: reuse the cart's own address/type/shipments/branch, pick
+    the chronologically earliest `available: true` slot from a shuffled
+    response (_available_timeslots sorts), apply in one
+    silpo_update_shopping_cart call, no prompts."""
+    client = FakeClient(
+        {
+            "silpo_get_time_slots": time_slots_response(
+                {"start": "2026-08-07T12:00:00", "end": "2026-08-07T14:00:00", "available": True},
+                {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00", "available": True},
+                {"start": "2026-08-06T08:00:00", "end": "2026-08-06T10:00:00", "available": False},
+            ),
+            "silpo_update_shopping_cart": {"success": True},
+        }
+    )
+
+    result = roll_timeslot_to_nearest(client, _roll_context(), print_fn=lambda *a: None)
+
+    assert result.applied is True
+    assert result.delivery_type == "DeliveryHome"
+    assert (
+        "silpo_update_shopping_cart",
+        {
+            "shoppingCartId": "cart-1",
+            "deliveryType": "DeliveryHome",
+            "timeslot": {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00"},
+            "address": {"addressType": "flat", "latitude": "49.24", "longitude": "28.48", "city": "Вінниця"},
+            "shipments": [{"id": "ship-1", "companyId": "c1", "branchId": "old-branch", "products": []}],
+        },
+    ) in client.calls
+    assert (
+        client.calls.count(("silpo_get_time_slots", {"branchId": "old-branch", "deliveryTypes": ["DeliveryHome"]})) == 1
+    )
+
+
+def test_roll_timeslot_to_nearest_no_available_slots_returns_not_applied():
+    client = FakeClient(
+        {
+            "silpo_get_time_slots": time_slots_response(
+                {"start": "2026-08-06T08:00:00", "end": "2026-08-06T10:00:00", "available": False},
+            ),
+        }
+    )
+    printed = []
+
+    result = roll_timeslot_to_nearest(
+        client, _roll_context(), print_fn=lambda *a: printed.append(" ".join(str(x) for x in a))
+    )
+
+    assert result.applied is False
+    assert all(call[0] != "silpo_update_shopping_cart" for call in client.calls)
+    assert any("timeslot" in line for line in printed)
+
+
+def test_roll_timeslot_to_nearest_missing_context_returns_not_applied_without_calls():
+    client = FakeClient({})
+    printed = []
+
+    result = roll_timeslot_to_nearest(
+        client, _roll_context(address=None), print_fn=lambda *a: printed.append(" ".join(str(x) for x in a))
+    )
+
+    assert result.applied is False
+    assert client.calls == []
+    assert any("delivery" in line for line in printed)
+
+
+def test_keep_address_slot_1_is_chronologically_earliest_even_from_shuffled_response():
+    """_pick_timeslot's "1" == _available_timeslots()[0], and that helper
+    sorts by `start` -- so a shuffled silpo_get_time_slots response still
+    yields the earliest slot (same source of truth roll_timeslot_to_nearest
+    uses)."""
+    responses = _base_responses(
+        silpo_get_shopping_cart_by_id=[cart_by_id_response(), cart_by_id_response()],
+        silpo_get_time_slots=time_slots_response(
+            {"start": "2026-08-06T14:00:00", "end": "2026-08-06T16:00:00", "available": True},
+            {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00", "available": True},
+            {"start": "2026-08-06T18:00:00", "end": "2026-08-06T20:00:00", "available": True},
+        ),
+    )
+    client = FakeClient(responses)
+
+    result = run_delivery_settings(
+        client, FakeLogStore(), input_fn=make_input("1"), print_fn=lambda *a: None, keep_address=True
+    )
+
+    assert result.applied is True
+    update = next(args for tool, args in client.calls if tool == "silpo_update_shopping_cart")
+    assert update["timeslot"] == {"start": "2026-08-06T10:00:00", "end": "2026-08-06T12:00:00"}
 
 
 def test_post_apply_report_identifies_newly_unavailable_cart_items():

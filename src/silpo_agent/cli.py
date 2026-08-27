@@ -22,7 +22,11 @@ from importlib.metadata import version
 
 from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import MCPClient, TokenStore
-from silpo_agent.cart_context import confirm_no_blocking_validations, resolve_cart_context
+from silpo_agent.cart_context import (
+    confirm_no_blocking_validations,
+    errors_are_only_stale_timeslot,
+    resolve_cart_context,
+)
 from silpo_agent.cart_editor import (
     add_cart_item,
     CartEditError,
@@ -35,8 +39,8 @@ from silpo_agent.cart_editor import (
 from silpo_agent.cart_viewer import format_cart
 from silpo_agent.cart_writer import trim_by_source_priority, write_cart
 from silpo_agent.coupons_lister import list_coupons
-from silpo_agent.delivery_settings import run_delivery_settings
-from silpo_agent.favorites_deals import list_favorites_deals
+from silpo_agent.delivery_settings import roll_timeslot_to_nearest, run_delivery_settings
+from silpo_agent.favorites_deals import fetch_favorite_products, list_favorites_deals
 from silpo_agent.log_store import ReorderLogStore
 from silpo_agent.norm_dataset import get_norms
 from silpo_agent.norm_top_up import find_uncovered_categories, resolve_norm_top_up_items
@@ -48,21 +52,68 @@ from silpo_agent.substitution_resolver import SubstitutionResult, resolve_substi
 from silpo_agent.timeslot_format import format_timeslot
 
 
-def _auto_yes_input_fn(print_fn):
-    """input_fn that answers every reorder prompt without a terminal attached.
+class NonInteractivePromptError(Exception):
+    """Raised by `_auto_yes_input_fn` when `--yes` hits a prompt it can't
+    safely auto-answer -- a free-text question (`"Enter a delivery
+    address: "`, NovaPoshta's settlement search). Returning "y" there would
+    send garbage as a real API query. Caught at the `_run_*` boundary in
+    `main`, which prints the offending prompt to stderr and exits 1."""
 
-    Confirms the proposed default on yes/no prompts ("[y/N]", "[Y/n]") and
-    picks the first candidate on numbered picks ("Pick a number: "). Echoes
-    the prompt and its answer via print_fn so --yes runs stay auditable in
-    the output instead of silently deciding things.
+
+def _auto_yes_input_fn(print_fn):
+    """input_fn for `--yes` runs with no terminal attached.
+
+    Only answers the two prompt shapes it actually understands:
+    - yes/no (`[y/N]` / `[Y/n]` in the text) -> "y"
+    - numbered pick (ends with "number:", or the address resolver's
+      "Pick a number, or type a new address: ") -> "1"
+    Anything else is a free-text prompt -- it raises
+    `NonInteractivePromptError` rather than feeding "y" into a search call.
+    So `--yes` supports DeliveryHome/SelfPickup (numbered picks) but not
+    NovaPoshta or a brand-new address (free-text). Every answer is echoed
+    via print_fn so `--yes` runs stay auditable.
     """
 
     def _input(prompt: str) -> str:
-        answer = "1" if "Pick a number:" in prompt else "y"
+        low = prompt.lower()
+        if "[y/n]" in low:
+            answer = "y"
+        elif prompt.rstrip().endswith("number:") or "a number," in prompt:
+            answer = "1"
+        else:
+            raise NonInteractivePromptError(prompt.strip())
         print_fn(f"{prompt}{answer}")
         return answer
 
     return _input
+
+
+def _report_unanswerable_prompt(exc: NonInteractivePromptError) -> int:
+    print(f"--yes: cannot auto-answer prompt: {exc}", file=sys.stderr)
+    return 1
+
+
+def _maybe_roll_stale_timeslot(client, cart_context, *, resolved_address, log_store, input_fn, print_fn):
+    """Shared by `reorder` and `smart-cart`, run right before the
+    `confirm_no_blocking_validations` gate: if a stale/expired timeslot
+    (`timeslot.not_found`) is the *only* blocking validation, offer to roll
+    it to the nearest available slot -- interactive one-line confirm
+    (default yes), or automatic under `--yes` (routed through `input_fn`,
+    which answers "y" to the `[Y/n]` prompt). On a successful roll the cart
+    context is re-resolved so product search/substitution run against the
+    fresh context. Any non-timeslot error, a decline, or a failed roll
+    returns `cart_context` untouched, so the existing gate then handles it
+    exactly as before."""
+    if not errors_are_only_stale_timeslot(cart_context):
+        return cart_context
+    answer = (input_fn or input)("Stale timeslot -- use nearest available? [Y/n] ").strip().lower()
+    if answer not in ("", "y", "yes"):
+        return cart_context
+    if not roll_timeslot_to_nearest(client, cart_context, print_fn=print_fn).applied:
+        return cart_context
+    return resolve_cart_context(
+        client, resolved_address=resolved_address, log_store=log_store, input_fn=input_fn, print_fn=print_fn
+    )
 
 
 def _run_reorder(
@@ -97,6 +148,10 @@ def _run_reorder(
         print_fn(f"Timeslot: {format_timeslot(cart_context.timeslot_start, cart_context.timeslot_end)}")
     else:
         print_fn("Timeslot: not set yet -- run 'silpo-agent delivery' to choose one")
+
+    cart_context = _maybe_roll_stale_timeslot(
+        client, cart_context, resolved_address=address, log_store=log_store, input_fn=input_fn, print_fn=print_fn
+    )
 
     if not confirm_no_blocking_validations(cart_context, input_fn=input_fn, print_fn=print_fn):
         print_fn("Aborted: fix the delivery context (e.g. run 'silpo-agent delivery') and try again.")
@@ -161,6 +216,7 @@ def _run_smart_cart(
     people: int = 1,
     basket_type: str = "eco",
     budget: float | None = None,
+    fill_to: float | None = None,
     no_reorder: bool = False,
 ) -> int:
     """Ticket 02/04/05: same pipeline as `_run_reorder` (Address Resolver ->
@@ -183,12 +239,28 @@ def _run_smart_cart(
     path `write_cart` offers (that trims by frequency across the whole
     list at once, which would mis-order norms/favorites since both are
     built with frequency=0.0). The already-trimmed list is passed to
-    `write_cart` with `budget=None` since the trim already happened."""
+    `write_cart` with `budget=None` since the trim already happened.
+
+    `--fill-to` is the opposite of `--budget` (and mutually exclusive with
+    it): instead of trimming down to a cap, it tops the cart UP toward a
+    target spend. After the typical/favorite/norm sources settle, store-wide
+    deals (`promo_scanner.scan_deals`, discount-% desc) are walked and any
+    that still fit under the target -- and aren't already in the cart or a
+    pending add -- are proposed behind a single [y/N] gate, then folded into
+    the same `write_cart` call as another source."""
     print_fn = print_fn or print
     input_fn = _auto_yes_input_fn(print_fn) if yes else None
 
     if people <= 0:
         print_fn(f"smart-cart: --people must be a positive integer, got {people}")
+        return 1
+
+    if fill_to is not None and budget is not None:
+        print_fn("smart-cart: --fill-to and --budget are mutually exclusive")
+        return 1
+
+    if fill_to is not None and fill_to <= 0:
+        print_fn(f"smart-cart: --fill-to must be a positive number, got {fill_to}")
         return 1
 
     if not no_reorder and (last is None or threshold is None):
@@ -213,6 +285,10 @@ def _run_smart_cart(
     else:
         print_fn("Timeslot: not set yet -- run 'silpo-agent delivery' to choose one")
 
+    cart_context = _maybe_roll_stale_timeslot(
+        client, cart_context, resolved_address=address, log_store=log_store, input_fn=input_fn, print_fn=print_fn
+    )
+
     if not confirm_no_blocking_validations(cart_context, input_fn=input_fn, print_fn=print_fn):
         print_fn("Aborted: fix the delivery context (e.g. run 'silpo-agent delivery') and try again.")
         return 1
@@ -234,8 +310,9 @@ def _run_smart_cart(
     items = substitution_result.items
     typical_ids = {item.product_id for item in items}
 
+    fav_products = fetch_favorite_products(client, cart_context)
     favorite_deals = list_favorites_deals(
-        client, log_store, input_fn=input_fn, print_fn=print_fn, cart_context=cart_context
+        client, log_store, input_fn=input_fn, print_fn=print_fn, cart_context=cart_context, products=fav_products
     )
     favorite_items = [
         TypicalItem(product_id=deal.product_id, frequency=0.0, last_known_price=deal.price, name=deal.name)
@@ -277,6 +354,65 @@ def _run_smart_cart(
             norm_items = norm_candidates
     norm_ids = {item.product_id for item in norm_items}
 
+    # Ticket: --fill-to. A final source layered on top, greedily filling
+    # toward the target from a priority pool: (1) the user's favorited
+    # products at any price (a known preference beats a random store deal),
+    # then -- only if favorites fell short -- (2) store-wide deals walked in
+    # discount-% order (scan_deals's own sort). Each is taken only if it
+    # still fits and isn't already in the cart or a pending add; scanning
+    # continues past a miss, since a cheaper later item may still fit.
+    # `projected` counts price*quantity: a pending typical line carries its
+    # historical mean quantity and a norm line scales with --people, so the
+    # real payable is what the target is measured against. Mutually exclusive
+    # with --budget, so the trim path below never runs when this does.
+    fill_items: list[TypicalItem] = []
+    fill_sources: dict[str, str] = {}
+    if fill_to is not None:
+        pending = items + favorite_items + norm_items
+        projected = (cart_context.total_after_discounts or 0.0) + sum(
+            i.last_known_price * i.quantity for i in pending
+        )
+        if projected >= fill_to:
+            print_fn(f"Already at {projected:.2f} of {fill_to:.2f} target; nothing to fill.")
+        else:
+            blocked_ids = {p.get("productId") for p in cart_context.products} | {i.product_id for i in pending}
+            fill_candidates: list[tuple[str, TypicalItem]] = []
+
+            def _consider(source: str, pid, name, price) -> None:
+                nonlocal projected
+                if pid and pid not in blocked_ids and price is not None and projected + price <= fill_to:
+                    fill_candidates.append(
+                        (source, TypicalItem(product_id=pid, frequency=0.0, last_known_price=price, name=name or pid))
+                    )
+                    blocked_ids.add(pid)
+                    projected += price
+
+            for product in fav_products:
+                _consider("fav", product.get("id"), product.get("name"), product.get("price"))
+            # Only pay for the store-wide deal scan (1 promotions call + 1
+            # products call per active campaign) if favorites fell short.
+            if projected < fill_to:
+                for deal in scan_deals(client, cart_context, limit=100):
+                    _consider("deal", deal.product_id, deal.name, deal.price)
+
+            if fill_candidates:
+                print_fn(f"Filling toward {fill_to:.2f}:")
+                for source, item in fill_candidates:
+                    print_fn(f"  - [{source}] {item.name or item.product_id}: {item.last_known_price:.2f}")
+                confirm_input = input_fn or input
+                answer = confirm_input("Add these fill-to-budget items to the cart? [y/N] ").strip().lower()
+                if answer in ("y", "yes"):
+                    fill_items = [item for _, item in fill_candidates]
+                    fill_sources = {item.product_id: source for source, item in fill_candidates}
+                if projected < fill_to:
+                    print_fn(
+                        f"Reached {projected:.2f} of {fill_to:.2f} target "
+                        f"({len(fill_candidates)} item(s) fit; pool exhausted)."
+                    )
+            else:
+                print_fn(f"No fill items found for the {fill_to:.2f} target (still at {projected:.2f}).")
+    fill_ids = {item.product_id for item in fill_items}
+
     trimmed_by_source: list[tuple[str, str, float]] = []
     if budget is not None:
         already_spent = cart_context.total_after_discounts or 0.0
@@ -284,7 +420,7 @@ def _run_smart_cart(
             [("norm", norm_items), ("favorite", favorite_items), ("typical", items)], budget, already_spent
         )
     else:
-        cart_items = items + favorite_items + norm_items
+        cart_items = items + favorite_items + norm_items + fill_items
 
     report = write_cart(client, cart_items, cart_context, input_fn=input_fn, print_fn=print_fn)
 
@@ -304,10 +440,13 @@ def _run_smart_cart(
     # Ticket 02/04 AC: report lists typical items, favorites-deals, and norm
     # additions distinctly, so the user can tell which source added what.
     typical_added = [
-        (pid, price) for pid, price in report.items_added if pid not in favorite_ids and pid not in norm_ids
+        (pid, price)
+        for pid, price in report.items_added
+        if pid not in favorite_ids and pid not in norm_ids and pid not in fill_ids
     ]
     favorite_added = [(pid, price) for pid, price in report.items_added if pid in favorite_ids]
     norm_added = [(pid, price) for pid, price in report.items_added if pid in norm_ids]
+    fill_added = [(pid, price) for pid, price in report.items_added if pid in fill_ids]
 
     print(f"Added {len(typical_added)} typical item(s):")
     for product_id, price in typical_added:
@@ -318,13 +457,27 @@ def _run_smart_cart(
     print(f"Added {len(norm_added)} norm item(s):")
     for product_id, price in norm_added:
         print(f"  - {product_id}: {price:.2f}")
+    print(f"Added {len(fill_added)} fill-to-budget item(s):")
+    for product_id, price in fill_added:
+        print(f"  - [{fill_sources[product_id]}] {product_id}: {price:.2f}")
     print(f"Total: {report.total:.2f}")
     print("Check your cart: https://silpo.ua/basket")
     return 0
 
 
-def _run_delivery(client, log_store, input_fn, print_fn) -> int:
-    result = run_delivery_settings(client, log_store, input_fn=input_fn, print_fn=print_fn)
+def _run_delivery(client, log_store, input_fn, print_fn, keep_address: bool = False, yes: bool = False) -> int:
+    if yes:
+        # Auto-answer every prompt: address confirm -> proposed, and every
+        # numbered pick (delivery type, branch/office, timeslot) -> "1"
+        # (first == nearest). With --keep-address this is a one-shot roll of
+        # a stale timeslot to the nearest available. Free-text prompts (a
+        # brand-new address, NovaPoshta settlement search) can't be
+        # auto-answered -- see _auto_yes_input_fn / the `yes` guard in
+        # run_delivery_settings.
+        input_fn = _auto_yes_input_fn(print_fn or print)
+    result = run_delivery_settings(
+        client, log_store, input_fn=input_fn, print_fn=print_fn, keep_address=keep_address, yes=yes
+    )
     return 0 if result.applied else 1
 
 
@@ -664,7 +817,7 @@ commands:
   cart edit       manually replace one cart item with another, or add a new one
   cart promos     show real promo alternatives for every item in your cart (read-only)
   reorder         rebuild your cart from your typical (frequently-bought) items
-  smart-cart      reorder, plus discounted favorites and a norm top-up (--people/--basket-type/--budget)
+  smart-cart      reorder, plus discounted favorites and a norm top-up (--people/--basket-type/--budget/--fill-to)
   delivery        explicitly set your delivery address, delivery type, and timeslot
   clear-context   wipe your local reorder history, substitution memory, and cached login
   coupons         list your active loyalty coupons (read-only)
@@ -704,8 +857,27 @@ what it does, in order:
      new delivery context -- purely informational, nothing is removed or
      swapped automatically
 
-interactive only -- no flags. an invalid or out-of-range choice at any step
-aborts cleanly without applying anything.
+--keep-address skips steps 1-2 entirely: it reuses the delivery address and
+delivery type already on your cart and only re-picks the timeslot (step 3),
+then applies (steps 4-5). Use it when a timeslot went stale
+(timeslot.not_found) but the address is still right. Aborts cleanly if the
+cart has no existing address/type to reuse -- run plain `delivery` then.
+
+--yes / -y runs the numbered-pick paths non-interactively: the proposed
+address is confirmed and every numbered pick (delivery type, pickup branch,
+timeslot) takes the first/nearest option. It can't answer a free-text
+prompt, so --yes covers DeliveryHome and SelfPickup but not NovaPoshta
+(settlement search) or a brand-new address -- those abort with a clear
+message; run `delivery` interactively for them. `delivery --keep-address
+--yes` is therefore a one-shot "roll my stale timeslot to the nearest
+available slot".
+
+`reorder` and `smart-cart` also detect a stale timeslot on their own: when
+it's the only problem with your cart they offer to roll it to the nearest
+slot before continuing (automatic under their own --yes).
+
+an invalid or out-of-range choice at any step aborts cleanly without
+applying anything.
 """
 
 _CART_EDIT_EPILOG = """\
@@ -771,16 +943,20 @@ what it does, in order:
      you can pick a different one or type a new one)
   2. looks at your last --last online orders, keeps items that appear in
      at least --threshold share of them ("typical items")
-  3. checks each typical item is still in stock; auto-substitutes when
+  3. if your cart's timeslot has gone stale (timeslot.not_found) and that's
+     the only problem, offers to roll it to the nearest available slot
+     before continuing (automatic under --yes); anything else still gates
+     with a plain "continue anyway?" as before
+  4. checks each typical item is still in stock; auto-substitutes when
      there's exactly one replacement, asks you when there's more than one
      (and remembers your answer for next time)
-  4. if --optimize promos was passed: applies any available loyalty
+  5. if --optimize promos was passed: applies any available loyalty
      bonuses to the cart
-  5. warns you before touching a non-empty cart (never silently merges
+  6. warns you before touching a non-empty cart (never silently merges
      or clears it) -- decline aborts with the cart untouched
-  6. if --budget was passed: trims your least-frequent typical items
+  7. if --budget was passed: trims your least-frequent typical items
      until the total fits
-  7. adds the final item set to your real Silpo cart and prints a report
+  8. adds the final item set to your real Silpo cart and prints a report
 
 it only ever fills the cart -- it never checks out or pays. that step is
 always manual, in the Silpo app or on silpo.ua.
@@ -871,7 +1047,9 @@ def main(
         description="Rebuild your Silpo cart from your typical items (same as `reorder`), plus add any of your "
         "favorited products currently on discount that aren't already in the cart, plus a norm top-up: for any "
         "grocery category not covered by the above, propose products sized to --people/--basket-type, gated "
-        "behind their own confirmation. Fills the cart only -- checkout/payment is always a manual step.",
+        "behind their own confirmation. --budget trims the result down to a cap; --fill-to (mutually exclusive "
+        "with --budget) instead tops it UP toward a target spend with the best store-wide deals. Fills the cart "
+        "only -- checkout/payment is always a manual step.",
     )
     smart_cart_parser.add_argument(
         "--last",
@@ -901,7 +1079,7 @@ def main(
         action="store_true",
         help="Non-interactive: auto-confirm the proposed delivery address, auto-confirm adding to a "
         "non-empty cart, auto-pick the first candidate on any substitution with multiple replacements, and "
-        "auto-confirm the proposed norm top-up additions.",
+        "auto-confirm the proposed norm top-up and --fill-to additions.",
     )
     smart_cart_parser.add_argument(
         "--people",
@@ -926,6 +1104,16 @@ def main(
         "priority: norm top-up items first (guesses, not known purchases), then favorited deals, then "
         "typical items as the last resort -- lowest-frequency-first within each source. Omit to add "
         "everything and just report the total.",
+    )
+    smart_cart_parser.add_argument(
+        "--fill-to",
+        type=float,
+        default=None,
+        metavar="UAH",
+        help="Optional target spend in UAH (must be positive). Mutually exclusive with --budget. After the "
+        "typical/favorite/norm sources settle, tops the cart UP toward this target from a priority pool -- your "
+        "favorited products first, then the biggest store-wide deals -- taking each that still fits (none "
+        "already in the cart or a pending add), gated behind a single [y/N] confirmation.",
     )
 
     cart_parser = subparsers.add_parser(
@@ -997,13 +1185,27 @@ def main(
         "alternatives is reported as such, not as an error.",
     )
 
-    subparsers.add_parser(
+    delivery_parser = subparsers.add_parser(
         "delivery",
         help="Explicitly set delivery address, delivery type, and timeslot",
         description="Explicitly set your delivery address, delivery type, and timeslot together, in one real "
         "update to your Silpo cart. Supports DeliveryHome, SelfPickup, and NovaPoshta.",
         epilog=_DELIVERY_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    delivery_parser.add_argument(
+        "--keep-address",
+        action="store_true",
+        help="Reuse the delivery address and type already on your cart and only re-pick the "
+        "timeslot. Use when a timeslot went stale (timeslot.not_found) but the address is fine.",
+    )
+    delivery_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Non-interactive: auto-confirm the proposed address and auto-pick the first (nearest) "
+        "option at every step -- delivery type, branch/office, and timeslot. With --keep-address, "
+        "a one-shot roll of a stale timeslot to the nearest available slot.",
     )
 
     clear_context_parser = subparsers.add_parser(
@@ -1069,31 +1271,45 @@ def main(
     if args.command is None:
         return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
-    if args.command == "reorder":
-        return _run_reorder(
-            args.last,
-            args.threshold,
-            client or MCPClient(),
-            log_store or ReorderLogStore(),
-            budget=args.budget,
-            optimize=args.optimize,
-            yes=args.yes,
-            print_fn=print_fn,
-        )
+    try:
+        if args.command == "reorder":
+            return _run_reorder(
+                args.last,
+                args.threshold,
+                client or MCPClient(),
+                log_store or ReorderLogStore(),
+                budget=args.budget,
+                optimize=args.optimize,
+                yes=args.yes,
+                print_fn=print_fn,
+            )
 
-    if args.command == "smart-cart":
-        return _run_smart_cart(
-            args.last,
-            args.threshold,
-            client or MCPClient(),
-            log_store or ReorderLogStore(),
-            yes=args.yes,
-            print_fn=print_fn,
-            people=args.people,
-            basket_type=args.basket_type,
-            budget=args.budget,
-            no_reorder=args.no_reorder,
-        )
+        if args.command == "smart-cart":
+            return _run_smart_cart(
+                args.last,
+                args.threshold,
+                client or MCPClient(),
+                log_store or ReorderLogStore(),
+                yes=args.yes,
+                print_fn=print_fn,
+                people=args.people,
+                basket_type=args.basket_type,
+                budget=args.budget,
+                fill_to=args.fill_to,
+                no_reorder=args.no_reorder,
+            )
+
+        if args.command == "delivery":
+            return _run_delivery(
+                client or MCPClient(),
+                log_store or ReorderLogStore(),
+                input_fn,
+                print_fn,
+                keep_address=args.keep_address,
+                yes=args.yes,
+            )
+    except NonInteractivePromptError as exc:
+        return _report_unanswerable_prompt(exc)
 
     if args.command == "cart":
         if args.cart_command == "edit":
@@ -1117,9 +1333,6 @@ def main(
             return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
         cart_parser.print_help()
         return 0
-
-    if args.command == "delivery":
-        return _run_delivery(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
 
     if args.command == "clear-context":
         return _run_clear_context(

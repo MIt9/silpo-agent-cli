@@ -44,25 +44,35 @@ silpo-agent reorder --last N --threshold 0-1 [--budget UAH] [--optimize promos] 
   (its own payable total) against the cap, not just the new items.
 - `--optimize promos` opt-in only; applies loyalty bonuses before checkout.
 - `--yes` / `-y` -- non-interactive: auto-confirms the proposed address,
-  auto-confirms adding to a non-empty cart, and auto-picks the first
-  candidate on multi-candidate substitutions. Every auto-answered prompt is
-  still printed, and the report still lists what was decided -- nothing
-  silent. Use this by default when running from an agent/chat context,
-  since a bare interactive `reorder` just hangs waiting on stdin.
+  auto-rolls a stale timeslot to the nearest slot when that's the only
+  problem, auto-confirms adding to a non-empty cart, and auto-picks the
+  first candidate on multi-candidate substitutions. Every auto-answered
+  prompt is still printed, and the report still lists what was decided --
+  nothing silent. Use this by default when running from an agent/chat
+  context, since a bare interactive `reorder` just hangs waiting on stdin.
+  `--yes` only answers yes/no and numbered-pick prompts -- if it hits a
+  free-text one (no saved delivery addresses at all), it aborts loudly
+  (`--yes: cannot auto-answer prompt: ...`, exit 1) instead of guessing.
 - No specifics from user → reasonable default `--last 10 --threshold 0.5`,
   and say that's what was picked.
 - Flow: confirm delivery address → resolve cart context, print
-  address/delivery type/timeslot → **if the cart has an error-level
-  validation (e.g. `timeslot.not_found`), warns and asks to continue --
-  decline aborts before any product search**, same as the non-empty-cart
-  guard below → find typical items → check stock, auto-substitute (asks
-  when >1 candidate) → optional promo optimize → **warns before touching a
-  non-empty cart**, decline aborts untouched → optional budget trim → adds
-  to real cart, prints report.
-- If the delivery info printed up front looks stale/wrong (old timeslot,
-  wrong address), run `silpo-agent delivery` first instead of pushing
-  through -- a stale timeslot makes every availability check
-  false-negative, and `--yes` alone won't catch it (see below).
+  address/delivery type/timeslot → **if a stale timeslot
+  (`timeslot.not_found`) is the *only* error-level validation, offers to
+  roll it to the nearest available slot** (`Stale timeslot -- use nearest
+  available? [Y/n]`, default yes; automatic under `--yes`), then re-resolves
+  and continues → **otherwise, if the cart has an error-level validation,
+  warns and asks to continue -- decline aborts before any product search**,
+  same as the non-empty-cart guard below → find typical items → check
+  stock, auto-substitute (asks when >1 candidate) → optional promo optimize
+  → **warns before touching a non-empty cart**, decline aborts untouched →
+  optional budget trim → adds to real cart, prints report.
+- The stale-timeslot roll above means `reorder --yes` now self-heals the
+  most common stale-context case. If the roll fails (no slots) or there are
+  *other* errors too, you still fall through to the plain continue-anyway
+  gate. If the delivery info printed up front looks wrong in some other way,
+  run `silpo-agent delivery` first instead of pushing through (or
+  `silpo-agent delivery --keep-address` / `--keep-address --yes` when only
+  the timeslot is stale and the address is still right).
 - Fills cart only. Never checks out or pays -- that's always manual in the
   app or on silpo.ua. If asked to "buy"/"checkout", say `reorder` can't do
   that.
@@ -70,8 +80,8 @@ silpo-agent reorder --last N --threshold 0-1 [--budget UAH] [--optimize promos] 
 ### smart-cart -- reorder, plus discounted favorites and a norm top-up
 
 ```bash
-silpo-agent smart-cart --last N --threshold 0-1 [--people N] [--basket-type basic|eco|premium] [--budget UAH] [--yes]
-silpo-agent smart-cart --no-reorder [--people N] [--basket-type basic|eco|premium] [--budget UAH] [--yes]
+silpo-agent smart-cart --last N --threshold 0-1 [--people N] [--basket-type basic|eco|premium] [--budget UAH | --fill-to UAH] [--yes]
+silpo-agent smart-cart --no-reorder [--people N] [--basket-type basic|eco|premium] [--budget UAH | --fill-to UAH] [--yes]
 ```
 - `--no-reorder` skips typical items (order history) entirely -- cart built
   from favorited-on-discount + norm top-up only. `--last`/`--threshold`
@@ -103,12 +113,20 @@ silpo-agent smart-cart --no-reorder [--people N] [--basket-type basic|eco|premiu
   lowest-frequency-first tie-break within a source that `reorder --budget`
   uses. Counts what's already in the cart against the cap, same as
   `reorder`.
+- `--fill-to UAH` is the opposite of `--budget` (mutually exclusive with
+  it): tops the cart UP toward a target spend after the three sources
+  settle. Greedily fills from a priority pool -- the user's favorited
+  products first (at any price), then the biggest store-wide deals -- taking
+  each only if it still fits under the target and isn't already in the cart
+  or a pending add. Shown as their own list ("Filling toward N:", each line
+  tagged `[fav]`/`[deal]`) with a single `[y/N]` gate, then folded into the
+  same one cart write. Prints how close it got if the pool runs out first.
 - `--yes` / `-y` -- same as `reorder`, plus auto-confirms the norm top-up's
-  own prompt.
-- The report lists all three sources separately ("Added N typical
-  item(s)" / "Added M favorited deal(s)" / "Added K norm item(s)"), and a
-  budget trim's "Trimmed" section is labeled by which source each dropped
-  item came from.
+  and `--fill-to`'s own prompts.
+- The report lists each source separately ("Added N typical item(s)" /
+  "Added M favorited deal(s)" / "Added K norm item(s)" / "Added J
+  fill-to-budget item(s)"), and a budget trim's "Trimmed" section is
+  labeled by which source each dropped item came from.
 - Fills cart only, same as `reorder` -- never checks out or pays.
 - Use this instead of `reorder` when the user wants their cart topped up
   toward a complete grocery basket (by household size/budget tier), not
@@ -160,13 +178,34 @@ silpo-agent cart edit --remove SLUG                 # delete a line, nothing add
 
 ```bash
 silpo-agent delivery
+silpo-agent delivery --keep-address        # only re-pick the timeslot
+silpo-agent delivery --keep-address --yes  # one-shot: roll stale timeslot to nearest
+silpo-agent delivery --yes                 # full flow, DeliveryHome/SelfPickup only
 ```
-Interactive only, no flags. Confirms address → pick delivery type
-(DeliveryHome, SelfPickup, NovaPoshta supported; anything else stops
-without changes) → for SelfPickup picks nearest branch, for NovaPoshta
-searches settlement then office/locker → pick real timeslot → applies all
-three together in one cart update → reports any cart items now unavailable
-under the new delivery context (informational only, nothing auto-removed).
+Interactive. Confirms address → pick delivery type (DeliveryHome,
+SelfPickup, NovaPoshta supported; anything else stops without changes) →
+for SelfPickup picks nearest branch, for NovaPoshta searches settlement
+then office/locker → pick real timeslot → applies all three together in
+one cart update → reports any cart items now unavailable under the new
+delivery context (informational only, nothing auto-removed).
+
+`--keep-address` skips the address and delivery-type prompts entirely,
+reusing the address and type already on the cart and only re-picking the
+timeslot. Use it when a timeslot went stale (`timeslot.not_found`) but the
+address is still right. Aborts cleanly if the cart has no existing
+address/type to reuse (run plain `silpo-agent delivery` then).
+
+`--yes` / `-y` runs the command non-interactively for the **numbered-pick**
+paths only: the proposed address is confirmed and every numbered pick
+(delivery type, pickup branch, timeslot) takes the first/nearest option.
+It cannot answer a free-text prompt -- so `--yes` supports **DeliveryHome
+and SelfPickup**, but **not** NovaPoshta (settlement search) or a
+brand-new address (no saved addresses): those abort loudly
+(`--yes: cannot auto-answer prompt: ...`, exit 1) -- run plain
+`silpo-agent delivery` interactively for them. `delivery --keep-address
+--yes` is the one-shot "roll my stale timeslot to the nearest slot" -- the
+same fix `reorder`/`smart-cart` now offer inline when a stale timeslot is
+the only thing wrong with the cart.
 
 ### coupons / favorites-deals / deals -- read-only discovery
 
@@ -213,8 +252,12 @@ Run read-only `silpo-agent cart` first (even right after `delivery`, in the
 same conversation) and check its `Validations:` section is clean. Don't
 assume a just-confirmed address/timeslot is still valid. The CLI itself now
 gates on error-level validations (see "Delivery context validation guard"
-above), but checking first avoids running the whole pipeline just to hit
-the gate, and surfaces the actual state to the user before deciding.
+above), and `reorder`/`smart-cart` will offer (or, under `--yes`,
+automatically) roll a stale timeslot to the nearest slot when that's the
+only problem -- but checking first still avoids running the whole pipeline
+just to hit the gate, and surfaces the actual state to the user before
+deciding. A stale timeslot plus any *other* error still needs a manual
+`silpo-agent delivery`.
 
 ## Past runs / substitution memory
 
