@@ -18,7 +18,7 @@ def fail_login():
     raise AssertionError("login should not be called when a valid token is stored")
 
 
-def fail_refresh(refresh_token):
+def fail_refresh(refresh_token, client_id=None):
     raise AssertionError("refresh should not be called when token is still valid")
 
 
@@ -54,7 +54,7 @@ def test_expired_token_triggers_refresh_before_call():
     token_store = FakeTokenStore(expired)
     refreshed = {"access_token": "new-token", "refresh_token": "r2", "expires_at": 9999999999.0}
 
-    def fake_refresh(refresh_token):
+    def fake_refresh(refresh_token, client_id=None):
         assert refresh_token == "r1"
         return refreshed
 
@@ -130,6 +130,108 @@ def test_token_store_load_returns_none_for_corrupt_value(monkeypatch):
     store = TokenStore(service="test-service", username="test-user")
 
     assert store.load() is None
+
+
+def test_expired_token_refresh_carries_stored_client_id():
+    expired = {"access_token": "old", "refresh_token": "r1", "expires_at": 1000.0, "client_id": "cid-1"}
+    token_store = FakeTokenStore(expired)
+    seen = {}
+
+    def fake_refresh(refresh_token, client_id=None):
+        seen["refresh_token"] = refresh_token
+        seen["client_id"] = client_id
+        return {"access_token": "new", "refresh_token": "r2", "expires_at": 9999999999.0, "client_id": "cid-1"}
+
+    client = MCPClient(
+        token_store=token_store,
+        call_tool_http=lambda *a: {"ok": True},
+        login=fail_login,
+        refresh=fake_refresh,
+        now=lambda: 2000.0,
+    )
+
+    client.call("silpo_get_my_shopping_cart", {})
+
+    assert seen == {"refresh_token": "r1", "client_id": "cid-1"}
+
+
+def test_rejected_refresh_falls_back_to_browser_login():
+    """A stored token from before client_id was persisted (or a revoked
+    grant) makes the endpoint answer 401 -- recover with a fresh login
+    instead of surfacing AuthError as a traceback."""
+    from silpo_agent.auth import AuthError
+
+    expired = {"access_token": "old", "refresh_token": "r1", "expires_at": 1000.0}
+    token_store = FakeTokenStore(expired)
+    fresh = {"access_token": "fresh", "refresh_token": "r2", "expires_at": 9999999999.0, "client_id": "cid-9"}
+
+    def failing_refresh(refresh_token, client_id=None):
+        raise AuthError("https://mcp.silpo.ua/token returned 401: invalid_client")
+
+    used = []
+
+    client = MCPClient(
+        token_store=token_store,
+        call_tool_http=lambda s, t, a, tok: used.append(tok) or {"ok": True},
+        login=lambda: fresh,
+        refresh=failing_refresh,
+        now=lambda: 2000.0,
+    )
+
+    client.call("silpo_get_my_shopping_cart", {})
+
+    assert used == ["fresh"]
+    assert token_store.load() == fresh
+
+
+def test_expired_token_without_refresh_token_logs_in_directly():
+    token_store = FakeTokenStore({"access_token": "old", "expires_at": 1000.0})
+    fresh = {"access_token": "fresh", "refresh_token": "r2", "expires_at": 9999999999.0, "client_id": "cid-9"}
+
+    client = MCPClient(
+        token_store=token_store,
+        call_tool_http=lambda *a: {"ok": True},
+        login=lambda: fresh,
+        refresh=fail_refresh,
+        now=lambda: 2000.0,
+    )
+
+    client.call("silpo_get_my_shopping_cart", {})
+
+    assert token_store.load() == fresh
+
+
+def test_refresh_token_http_sends_client_id_when_known(monkeypatch):
+    import silpo_agent.auth as auth_module
+
+    captured = {}
+
+    def fake_post_form(url, fields):
+        captured.update(fields)
+        return {"access_token": "new", "refresh_token": "r2", "expires_in": 3600}
+
+    monkeypatch.setattr(auth_module, "_post_form", fake_post_form)
+
+    token = auth_module.refresh_token_http("r1", "cid-1")
+
+    assert captured == {"grant_type": "refresh_token", "refresh_token": "r1", "client_id": "cid-1"}
+    assert token["client_id"] == "cid-1"
+
+
+def test_refresh_token_http_omits_absent_client_id(monkeypatch):
+    import silpo_agent.auth as auth_module
+
+    captured = {}
+
+    def fake_post_form(url, fields):
+        captured.update(fields)
+        return {"access_token": "new", "expires_in": 3600}
+
+    monkeypatch.setattr(auth_module, "_post_form", fake_post_form)
+
+    auth_module.refresh_token_http("r1")
+
+    assert "client_id" not in captured
 import json
 
 import silpo_agent.auth as auth_module

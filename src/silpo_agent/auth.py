@@ -100,13 +100,14 @@ def _post_form(url: str, fields: dict) -> dict:
         raise AuthError(f"{url} returned {exc.code}: {exc.read().decode(errors='replace')}") from exc
 
 
-def _token_from_response(resp: dict) -> dict:
+def _token_from_response(resp: dict, client_id: str | None = None) -> dict:
     if "access_token" not in resp:
         raise AuthError(f"token endpoint response missing access_token: {resp}")
     return {
         "access_token": resp["access_token"],
         "refresh_token": resp.get("refresh_token"),
         "expires_at": time.time() + float(resp.get("expires_in", 3600)),
+        "client_id": client_id,
     }
 
 
@@ -193,12 +194,19 @@ def pkce_browser_login() -> dict:
             "code_verifier": verifier,
         },
     )
-    return _token_from_response(resp)
+    return _token_from_response(resp, client_id)
 
 
-def refresh_token_http(refresh_token: str) -> dict:
-    resp = _post_form(TOKEN_URL, {"grant_type": "refresh_token", "refresh_token": refresh_token})
-    return _token_from_response(resp)
+def refresh_token_http(refresh_token: str, client_id: str | None = None) -> dict:
+    # Live failure (2026-10-09): the token endpoint answers refreshes
+    # without a client_id with 401 invalid_client ("Client ID is required"),
+    # so the dynamically registered id must ride along on every token call,
+    # not just the authorize request.
+    fields = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+    if client_id:
+        fields["client_id"] = client_id
+    resp = _post_form(TOKEN_URL, fields)
+    return _token_from_response(resp, client_id)
 
 
 def call_tool_http(server_url: str, tool: str, args: dict, access_token: str) -> dict:
@@ -257,10 +265,19 @@ class MCPClient:
 
     def _ensure_token(self) -> str:
         token = self.token_store.load()
-        if token is None:
-            token = self.login()
-            self.token_store.save(token)
-        elif token["expires_at"] <= self.now():
-            token = self.refresh(token["refresh_token"])
-            self.token_store.save(token)
+        if token is not None and token.get("access_token") and token.get("expires_at", 0) > self.now():
+            return token["access_token"]
+        if token is not None and token.get("refresh_token"):
+            try:
+                token = self.refresh(token["refresh_token"], token.get("client_id"))
+                self.token_store.save(token)
+                return token["access_token"]
+            except AuthError:
+                pass
+        # No usable token (first run, missing refresh token, or the
+        # refresh itself was rejected -- e.g. a stored token from before
+        # client_id was persisted, or a revoked grant): full browser login
+        # instead of surfacing the endpoint's 401 as a traceback.
+        token = self.login()
+        self.token_store.save(token)
         return token["access_token"]
