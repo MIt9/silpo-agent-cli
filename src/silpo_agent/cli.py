@@ -21,7 +21,7 @@ from datetime import date
 from importlib.metadata import version
 
 from silpo_agent.address_resolver import resolve_address
-from silpo_agent.auth import MCPClient, TokenStore
+from silpo_agent.auth import AuthError, MCPClient, MCPError, TokenStore
 from silpo_agent.cart_context import (
     confirm_no_blocking_validations,
     errors_are_only_stale_timeslot,
@@ -96,6 +96,43 @@ def _auto_yes_input_fn(print_fn):
 def _report_unanswerable_prompt(exc: NonInteractivePromptError) -> int:
     print(f"--yes: cannot auto-answer prompt: {exc}", file=sys.stderr)
     return 1
+
+
+def _format_mcp_error(exc: MCPError) -> str:
+    """An MCP error payload is usually a dict (`code`/`message`), not a
+    sentence -- pull the human part out instead of printing the raw dict."""
+    err = exc.args[0] if exc.args else exc
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("error_description") or err)
+    return str(err)
+
+
+def _report_auth_error(exc: AuthError) -> int:
+    print(f"Error: authentication failed: {exc}", file=sys.stderr)
+    print(
+        "If the browser login didn't complete, run the command again; "
+        "to reset the cached login, run 'silpo-agent clear-context --yes'.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _report_mcp_error(exc: MCPError) -> int:
+    print(f"Error: Silpo request failed: {_format_mcp_error(exc)}", file=sys.stderr)
+    return 1
+
+
+def _silence_broken_pipe() -> None:
+    """Piped into `head` (or a closed terminal), stdout's fd is gone --
+    point it at devnull so interpreter shutdown doesn't print its own
+    `BrokenPipeError: Exception ignored` after we already exited cleanly."""
+    try:
+        import os
+
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except OSError:
+        pass
 
 
 def _maybe_roll_stale_timeslot(client, cart_context, *, resolved_address, log_store, input_fn, print_fn):
@@ -1430,10 +1467,10 @@ def main(
 
     args = parser.parse_args(argv)
 
-    if args.command is None:
-        return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
-
     try:
+        if args.command is None:
+            return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+
         if args.command == "reorder":
             return _run_reorder(
                 args.last,
@@ -1470,83 +1507,92 @@ def main(
                 keep_address=args.keep_address,
                 yes=args.yes,
             )
+        if args.command == "cart":
+            if args.cart_command == "edit":
+                if args.quantity != 1 and args.add is None:
+                    print_fn("cart edit: --quantity is only valid together with --add")
+                    return 1
+                return _run_cart_edit(
+                    client or MCPClient(),
+                    log_store or ReorderLogStore(),
+                    input_fn,
+                    print_fn,
+                    args.replace,
+                    args.add,
+                    args.quantity,
+                    args.qty,
+                    args.remove,
+                )
+            if args.cart_command == "promos":
+                return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+            if args.cart_command == "clear":
+                return _run_cart_clear(
+                    client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn, yes=args.yes
+                )
+            if args.cart_command is None:
+                return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+            cart_parser.print_help()
+            return 0
+
+        if args.command == "clear-context":
+            return _run_clear_context(
+                log_store or ReorderLogStore(), token_store or TokenStore(), input_fn, print_fn, yes=args.yes
+            )
+
+        if args.command == "coupons":
+            return _run_coupons(client or MCPClient())
+
+        if args.command == "favorites-deals":
+            return _run_favorites_deals(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+
+        if args.command == "deals":
+            if args.list_categories:
+                return _run_deals_list_categories(
+                    client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn
+                )
+            return _run_deals(
+                client or MCPClient(), args.limit, log_store or ReorderLogStore(), input_fn, print_fn, args.category
+            )
+
+        if args.command == "search":
+            return _run_search(client or MCPClient(), log_store or ReorderLogStore(), args.query, args.limit, input_fn, print_fn)
+
+        if args.command == "favorites":
+            if args.favorites_command == "add":
+                return _run_favorites_add(
+                    client or MCPClient(), log_store or ReorderLogStore(), args.slug, input_fn, print_fn
+                )
+            if args.favorites_command == "remove":
+                return _run_favorites_remove(
+                    client or MCPClient(), log_store or ReorderLogStore(), args.slug, input_fn, print_fn
+                )
+            if args.favorites_command is None:
+                return _run_favorites(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+            favorites_parser.print_help()
+            return 0
+
+        if args.command == "orders":
+            return _run_orders(
+                client or MCPClient(), log_store or ReorderLogStore(), args.last, offline=args.offline,
+                input_fn=input_fn, print_fn=print_fn,
+            )
+
+        if args.command == "loyalty":
+            return _run_loyalty(client or MCPClient(), print_fn)
+
+        return 0
     except NonInteractivePromptError as exc:
         return _report_unanswerable_prompt(exc)
-
-    if args.command == "cart":
-        if args.cart_command == "edit":
-            if args.quantity != 1 and args.add is None:
-                print_fn("cart edit: --quantity is only valid together with --add")
-                return 1
-            return _run_cart_edit(
-                client or MCPClient(),
-                log_store or ReorderLogStore(),
-                input_fn,
-                print_fn,
-                args.replace,
-                args.add,
-                args.quantity,
-                args.qty,
-                args.remove,
-            )
-        if args.cart_command == "promos":
-            return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
-        if args.cart_command == "clear":
-            return _run_cart_clear(
-                client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn, yes=args.yes
-            )
-        if args.cart_command is None:
-            return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
-        cart_parser.print_help()
+    except AuthError as exc:
+        return _report_auth_error(exc)
+    except MCPError as exc:
+        return _report_mcp_error(exc)
+    except (KeyboardInterrupt, EOFError):
+        print_fn("Aborted.")
+        return 1
+    except BrokenPipeError:
+        _silence_broken_pipe()
         return 0
-
-    if args.command == "clear-context":
-        return _run_clear_context(
-            log_store or ReorderLogStore(), token_store or TokenStore(), input_fn, print_fn, yes=args.yes
-        )
-
-    if args.command == "coupons":
-        return _run_coupons(client or MCPClient())
-
-    if args.command == "favorites-deals":
-        return _run_favorites_deals(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
-
-    if args.command == "deals":
-        if args.list_categories:
-            return _run_deals_list_categories(
-                client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn
-            )
-        return _run_deals(
-            client or MCPClient(), args.limit, log_store or ReorderLogStore(), input_fn, print_fn, args.category
-        )
-
-    if args.command == "search":
-        return _run_search(client or MCPClient(), log_store or ReorderLogStore(), args.query, args.limit, input_fn, print_fn)
-
-    if args.command == "favorites":
-        if args.favorites_command == "add":
-            return _run_favorites_add(
-                client or MCPClient(), log_store or ReorderLogStore(), args.slug, input_fn, print_fn
-            )
-        if args.favorites_command == "remove":
-            return _run_favorites_remove(
-                client or MCPClient(), log_store or ReorderLogStore(), args.slug, input_fn, print_fn
-            )
-        if args.favorites_command is None:
-            return _run_favorites(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
-        favorites_parser.print_help()
-        return 0
-
-    if args.command == "orders":
-        return _run_orders(
-            client or MCPClient(), log_store or ReorderLogStore(), args.last, offline=args.offline,
-            input_fn=input_fn, print_fn=print_fn,
-        )
-
-    if args.command == "loyalty":
-        return _run_loyalty(client or MCPClient(), print_fn)
-
-    return 0
 
 
 if __name__ == "__main__":
