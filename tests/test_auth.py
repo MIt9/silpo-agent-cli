@@ -124,10 +124,10 @@ def test_token_store_round_trips_through_keyring(monkeypatch, tmp_path):
     assert store.load() == {"access_token": "abc", "refresh_token": "r", "expires_at": 123.0}
 
 
-def test_token_store_load_returns_none_for_corrupt_value(monkeypatch):
+def test_token_store_load_returns_none_for_corrupt_value(monkeypatch, tmp_path):
     monkeypatch.setattr("silpo_agent.auth.keyring.get_password", lambda s, u: "not-json")
 
-    store = TokenStore(service="test-service", username="test-user")
+    store = TokenStore(service="test-service", username="test-user", file_path=str(tmp_path / "token.json"))
 
     assert store.load() is None
 
@@ -388,6 +388,90 @@ def test_token_store_clear_wipes_keyring_and_file(monkeypatch, tmp_path):
 
     assert deleted == [("test-service", "test-user")]
     assert not file_path.exists()
+
+
+def test_repeated_calls_share_one_login_when_store_loses_writes():
+    """Regression for the live double-login: the store can accept a save yet
+    return nothing on the next load (keychain write/read asymmetry), so the
+    client must reuse the in-process token instead of logging in per call."""
+    import silpo_agent.auth as auth_module
+
+    logins = []
+
+    class AmnesiacStore:
+        def load(self):
+            return None
+
+        def save(self, token):
+            pass
+
+        def clear(self):
+            pass
+
+    def counting_login():
+        logins.append(True)
+        return {"access_token": "t", "refresh_token": "r", "expires_at": 9999999999.0}
+
+    client = auth_module.MCPClient(
+        token_store=AmnesiacStore(),
+        call_tool_http=lambda *a: {"ok": True},
+        login=counting_login,
+        refresh=fail_refresh,
+        now=lambda: 2000.0,
+    )
+
+    client.call("silpo_get_my_shopping_cart", {})
+    client.call("silpo_get_shopping_cart_by_id", {})
+
+    assert len(logins) == 1
+
+
+def test_save_mirrors_to_both_backends(monkeypatch, tmp_path):
+    import json
+
+    import silpo_agent.auth as auth_module
+
+    saved = {}
+    monkeypatch.setattr(
+        auth_module.keyring, "set_password", lambda s, u, v: saved.__setitem__((s, u), v)
+    )
+    monkeypatch.setattr(auth_module.keyring, "get_password", lambda s, u: None)
+
+    file_path = tmp_path / "token.json"
+    store = auth_module.TokenStore(
+        service="test-service", username="test-user", file_path=str(file_path)
+    )
+    token = {"access_token": "abc", "refresh_token": "r", "expires_at": 123.0}
+
+    store.save(token)
+
+    assert json.loads(saved[("test-service", "test-user")]) == token
+    assert json.loads(file_path.read_text()) == token
+
+
+def test_load_takes_freshest_across_backends(monkeypatch, tmp_path):
+    import silpo_agent.auth as auth_module
+
+    file_path = tmp_path / "token.json"
+    file_path.write_text('{"access_token": "file-fresh", "expires_at": 9999.0}')
+    monkeypatch.setattr(
+        auth_module.keyring,
+        "get_password",
+        lambda s, u: '{"access_token": "chain-stale", "expires_at": 1000.0}',
+    )
+
+    store = auth_module.TokenStore(
+        service="test-service", username="test-user", file_path=str(file_path)
+    )
+    assert store.load()["access_token"] == "file-fresh"
+
+    file_path.write_text('{"access_token": "file-stale", "expires_at": 500.0}')
+    monkeypatch.setattr(
+        auth_module.keyring,
+        "get_password",
+        lambda s, u: '{"access_token": "chain-fresh", "expires_at": 9999.0}',
+    )
+    assert store.load()["access_token"] == "chain-fresh"
 import json
 
 import silpo_agent.auth as auth_module

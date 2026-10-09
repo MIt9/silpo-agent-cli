@@ -48,14 +48,15 @@ class AuthError(Exception):
 
 class TokenStore:
     """Wraps the OS keyring (via the `keyring` package) as JSON-serialized
-    token storage, with a 0600 file fallback. This is the mockable system
+    token storage, mirrored to a 0600 file. This is the mockable system
     boundary for auth persistence.
 
-    Live case (2026-10-09): macOS keychain writes can fail outright
-    (`PasswordSetError: -25244`) after a successful browser login -- without
-    a fallback the fresh token is lost and every run re-logins, then crashes
-    on save. Keyring stays primary; the file only carries tokens the keychain
-    refused, and `clear` wipes both.
+    Live cases (2026-10-09): macOS keychain writes can fail outright
+    (`PasswordSetError: -25244`) after a successful browser login, and --
+    worse -- writes can succeed while reads are denied for the same binary,
+    stranding the token and forcing a second browser login in the same run.
+    Every save mirrors to both backends; every load takes the freshest token
+    found in either. `clear` wipes both.
     """
 
     def __init__(
@@ -69,24 +70,33 @@ class TokenStore:
         self.file_path = file_path or os.path.join(os.path.expanduser("~"), ".silpo-agent", "token.json")
 
     def load(self) -> dict | None:
-        try:
-            raw = keyring.get_password(self.service, self.username)
-        except keyring.errors.KeyringError:
-            raw = None
-        if raw:
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                return None
-        return self._load_file()
+        """Freshest token wins across both backends: a save always mirrors
+        to both, but either write can fail independently (keychain denied
+        while the file lands, or vice versa) -- trusting only one side can
+        strand a fresh token where the next load never looks."""
+        keychain_token = self._load_keychain()
+        file_token = self._load_file()
+        candidates = [t for t in (keychain_token, file_token) if t and t.get("access_token")]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda t: t.get("expires_at") or 0)
 
     def save(self, token: dict) -> None:
+        """Mirror to both backends so a later load finds the token no matter
+        which side is readable (live case: keychain writes succeed but reads
+        are denied for this binary, stranding the token and forcing a second
+        browser login in the same run)."""
+        keychain_error: Exception | None = None
         try:
             keyring.set_password(self.service, self.username, json.dumps(token))
-            return
-        except keyring.errors.KeyringError:
-            pass
-        self._save_file(json.dumps(token))
+        except keyring.errors.KeyringError as exc:
+            keychain_error = exc
+        try:
+            self._save_file(json.dumps(token))
+        except OSError:
+            if keychain_error is not None:
+                raise keychain_error
+        return None
 
     def clear(self) -> None:
         try:
@@ -97,6 +107,18 @@ class TokenStore:
             os.remove(self.file_path)
         except OSError:
             pass
+
+    def _load_keychain(self) -> dict | None:
+        try:
+            raw = keyring.get_password(self.service, self.username)
+        except keyring.errors.KeyringError:
+            return None
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
 
     def _load_file(self) -> dict | None:
         try:
@@ -334,19 +356,32 @@ class MCPClient:
         self.login = login
         self.refresh = refresh
         self.now = now
+        self._cached_token: dict | None = None
 
     def call(self, tool: str, args: dict | None = None) -> dict:
         access_token = self._ensure_token()
         return self.call_tool_http(self.server_url, tool, args or {}, access_token)
 
     def _ensure_token(self) -> str:
+        # Process-lifetime cache: a command makes many tool calls, and the
+        # store can lie between them (live case: keychain writes succeed but
+        # reads are denied, so a second load right after save finds nothing
+        # and triggers a second browser login in the same run).
+        if (
+            self._cached_token is not None
+            and self._cached_token.get("access_token")
+            and self._cached_token.get("expires_at", 0) > self.now()
+        ):
+            return self._cached_token["access_token"]
         token = self.token_store.load()
         if token is not None and token.get("access_token") and token.get("expires_at", 0) > self.now():
+            self._cached_token = token
             return token["access_token"]
         if token is not None and token.get("refresh_token"):
             try:
                 token = self.refresh(token["refresh_token"], token.get("client_id"))
                 self.token_store.save(token)
+                self._cached_token = token
                 return token["access_token"]
             except AuthError:
                 pass
@@ -356,4 +391,5 @@ class MCPClient:
         # instead of surfacing the endpoint's 401 as a traceback.
         token = self.login()
         self.token_store.save(token)
+        self._cached_token = token
         return token["access_token"]

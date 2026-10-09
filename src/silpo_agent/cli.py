@@ -1607,6 +1607,9 @@ def main(
     except BrokenPipeError:
         _silence_broken_pipe()
         return 0
+    except OSError as exc:
+        print(f"Error: network or local storage failure: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -27,8 +27,8 @@ background them. `cart clear`, `favorites add/remove` mutate the real
 cart/favorites list -- confirm before running them unprompted.
 
 First run ever needs a one-time OAuth browser login against
-`mcp.silpo.ua`; token then caches in the OS keyring (file fallback
-`~/.silpo-agent/token.json` if the keychain refuses). If a run hangs with no
+`mcp.silpo.ua`; token then mirrors between the OS keyring and
+`~/.silpo-agent/token.json` (freshest copy wins). If a run hangs with no
 output, it's probably waiting on that browser tab, not crashed.
 
 ## Commands

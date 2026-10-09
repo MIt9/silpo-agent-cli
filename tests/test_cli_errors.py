@@ -83,3 +83,12 @@ def test_keyring_error_becomes_clean_exit_1_not_traceback(capsys):
 
     assert code == 1
     assert "keychain" in capsys.readouterr().err
+
+
+def test_transport_oserror_becomes_clean_exit_1_not_traceback(capsys):
+    import urllib.error
+
+    code = main([], client=ExplodingClient(urllib.error.URLError("dns down")))
+
+    assert code == 1
+    assert "Error:" in capsys.readouterr().err
