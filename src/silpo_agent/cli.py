@@ -30,6 +30,7 @@ from silpo_agent.cart_context import (
 from silpo_agent.cart_editor import (
     add_cart_item,
     CartEditError,
+    clear_cart,
     remove_cart_item,
     resolve_product_by_slug,
     search_replacement_candidates,
@@ -40,11 +41,15 @@ from silpo_agent.cart_viewer import format_cart
 from silpo_agent.cart_writer import trim_by_source_priority, write_cart
 from silpo_agent.coupons_lister import list_coupons
 from silpo_agent.delivery_settings import roll_timeslot_to_nearest, run_delivery_settings
+from silpo_agent.favorites import FavoriteError, add_favorite, list_favorites, remove_favorite
 from silpo_agent.favorites_deals import fetch_favorite_products, list_favorites_deals
 from silpo_agent.log_store import ReorderLogStore
+from silpo_agent.loyalty import get_loyalty_summary
 from silpo_agent.norm_dataset import get_norms
 from silpo_agent.norm_top_up import find_uncovered_categories, resolve_norm_top_up_items
 from silpo_agent.order_aggregator import InsufficientOrderHistoryError, TypicalItem, derive_typical_items
+from silpo_agent.order_history import run_orders
+from silpo_agent.product_search import run_search
 from silpo_agent.promo_finder import find_promo_alternatives
 from silpo_agent.promo_optimizer import optimize_promos
 from silpo_agent.promo_scanner import CategoryNotFoundError, list_category_titles, resolve_category, scan_deals
@@ -804,6 +809,89 @@ def _run_cart_promos(client, log_store, input_fn, print_fn) -> int:
     return 0
 
 
+def _run_search(client, log_store, query: str, limit: int, input_fn, print_fn) -> int:
+    if not query.strip():
+        print_fn("search: query must not be empty")
+        return 1
+    hits = run_search(client, log_store, query, limit, input_fn=input_fn, print_fn=print_fn)
+    if not hits:
+        print_fn(f"No products found for {query!r}.")
+        return 0
+    for hit in hits:
+        print_fn(hit.format())
+    return 0
+
+
+def _run_cart_clear(client, log_store, input_fn, print_fn, *, yes: bool = False) -> int:
+    cart_context = resolve_cart_context(client, input_fn=input_fn, log_store=log_store, print_fn=print_fn)
+    if not cart_context.shopping_cart_id:
+        print_fn("cart clear: no cart resolved; nothing to clear")
+        return 1
+    if not cart_context.products:
+        print_fn("Your cart is already empty.")
+        return 0
+    if not yes:
+        answer = input_fn(f"Clear {len(cart_context.products)} item(s) from your cart? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print_fn("Aborted: cart left unchanged.")
+            return 0
+    try:
+        removed = clear_cart(client, cart_context)
+    except CartEditError as exc:
+        print_fn(f"cart clear: {exc}")
+        return 1
+    print_fn(f"Cleared {removed} item(s).")
+    return 0
+
+
+def _run_favorites(client, log_store, input_fn, print_fn) -> int:
+    lines = list_favorites(client, log_store, input_fn=input_fn, print_fn=print_fn)
+    if not lines:
+        print_fn("No favorites found.")
+        return 0
+    for line in lines:
+        print_fn(line.format())
+    return 0
+
+
+def _run_favorites_add(client, log_store, slug: str, input_fn, print_fn) -> int:
+    cart_context = resolve_cart_context(client, input_fn=input_fn, log_store=log_store, print_fn=print_fn)
+    try:
+        added = add_favorite(client, cart_context, slug)
+    except FavoriteError as exc:
+        print_fn(f"favorites add: {exc}")
+        return 1
+    print_fn(f"Added {added.slug or added.name} to favorites.")
+    return 0
+
+
+def _run_favorites_remove(client, log_store, slug: str, input_fn, print_fn) -> int:
+    cart_context = resolve_cart_context(client, input_fn=input_fn, log_store=log_store, print_fn=print_fn)
+    try:
+        removed = remove_favorite(client, cart_context, slug)
+    except FavoriteError as exc:
+        print_fn(f"favorites remove: {exc}")
+        return 1
+    print_fn(f"Removed {removed.slug or removed.name} from favorites.")
+    return 0
+
+
+def _run_orders(client, log_store, limit: int, *, offline: bool = False, input_fn=None, print_fn=None) -> int:
+    summaries = run_orders(client, log_store, limit, offline=offline, input_fn=input_fn, print_fn=print_fn)
+    if not summaries:
+        print_fn("No orders found.")
+        return 0
+    for summary in summaries:
+        print_fn(summary.format())
+    return 0
+
+
+def _run_loyalty(client, print_fn) -> int:
+    for line in get_loyalty_summary(client).format():
+        print_fn(line)
+    return 0
+
+
 _TOP_LEVEL_EPILOG = """\
 First run triggers a one-time browser login (OAuth2.1+PKCE against
 mcp.silpo.ua); the token is cached in your OS keyring afterward, so
@@ -816,6 +904,11 @@ commands:
   cart            show your current real cart: items, payable total, bonus balance (read-only)
   cart edit       manually replace one cart item with another, or add a new one
   cart promos     show real promo alternatives for every item in your cart (read-only)
+  cart clear      empty your real cart (asks for confirmation)
+  search          free-text product search in your delivery context (read-only, prints slugs)
+  favorites       list all your favorited products (read-only); `favorites add/remove` to manage
+  orders          list your recent online orders (read-only); `--offline` for in-store receipts
+  loyalty         bonus balance, promos, promo codes, certificates (read-only)
   reorder         rebuild your cart from your typical (frequently-bought) items
   smart-cart      reorder, plus discounted favorites and a norm top-up (--people/--basket-type/--budget/--fill-to)
   delivery        explicitly set your delivery address, delivery type, and timeslot
@@ -1184,6 +1277,19 @@ def main(
         "informational -- never swaps or modifies anything in your cart. An item with no discounted "
         "alternatives is reported as such, not as an error.",
     )
+    clear_parser = cart_subparsers.add_parser(
+        "clear",
+        help="Empty your real cart (asks for confirmation)",
+        description="Removes every line from your real Silpo cart via silpo_clear_shopping_cart. "
+        "Asks for confirmation first unless --yes is passed; an already-empty cart reports it "
+        "without any MCP mutation.",
+    )
+    clear_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Non-interactive: skip the confirmation prompt and clear immediately.",
+    )
 
     delivery_parser = subparsers.add_parser(
         "delivery",
@@ -1266,6 +1372,62 @@ def main(
         "fetches no deals. Use this to see what to pass to --category.",
     )
 
+    search_parser = subparsers.add_parser(
+        "search",
+        help="Free-text product search in your delivery context (read-only)",
+        description="Search products by name against your current branch/delivery context and print each "
+        "hit with its slug -- the slug is what `cart edit --add/--replace` takes, and slugs cannot be "
+        "derived from a product name. Read-only, never touches the cart.",
+    )
+    search_parser.add_argument("query", metavar="QUERY", help="Free-text product name to search for.")
+    search_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        metavar="N",
+        help="How many top hits to show. Default: 10.",
+    )
+
+    favorites_parser = subparsers.add_parser(
+        "favorites",
+        help="List all your favorited products; `favorites add/remove` to manage",
+        description="List every product on your explicit favorites list (unlike `favorites-deals`, "
+        "which shows only the currently discounted subset). `favorites add SLUG` likes a product, "
+        "`favorites remove SLUG` unlikes it. Slugs come from `search`/`cart`/`deals` output.",
+    )
+    favorites_subparsers = favorites_parser.add_subparsers(dest="favorites_command")
+    favorites_add_parser = favorites_subparsers.add_parser("add", help="Like a product by slug")
+    favorites_add_parser.add_argument("slug", metavar="SLUG", help="Product slug to add to favorites.")
+    favorites_remove_parser = favorites_subparsers.add_parser("remove", help="Unlike a product by slug")
+    favorites_remove_parser.add_argument("slug", metavar="SLUG", help="Product slug to remove from favorites.")
+
+    orders_parser = subparsers.add_parser(
+        "orders",
+        help="List your recent online orders (read-only)",
+        description="Show recent online orders (newest first): number, date, amount, item count. "
+        "Same records `reorder --last` aggregates -- use this to pick a sensible --last value. "
+        "With --offline, shows in-store receipts instead (branch context from your cart).",
+    )
+    orders_parser.add_argument(
+        "--last",
+        type=int,
+        default=5,
+        metavar="N",
+        help="How many recent orders to show. Default: 5.",
+    )
+    orders_parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Show in-store (offline) receipts instead of online orders.",
+    )
+
+    subparsers.add_parser(
+        "loyalty",
+        help="Bonus balance, promos, promo codes, certificates (read-only)",
+        description="One loyalty snapshot: Балабонуси balance, personal promo selection state, "
+        "your promo codes, and certificates with expiry. Read-only, never touches the cart.",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -1329,6 +1491,10 @@ def main(
             )
         if args.cart_command == "promos":
             return _run_cart_promos(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+        if args.cart_command == "clear":
+            return _run_cart_clear(
+                client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn, yes=args.yes
+            )
         if args.cart_command is None:
             return _run_cart(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
         cart_parser.print_help()
@@ -1353,6 +1519,32 @@ def main(
         return _run_deals(
             client or MCPClient(), args.limit, log_store or ReorderLogStore(), input_fn, print_fn, args.category
         )
+
+    if args.command == "search":
+        return _run_search(client or MCPClient(), log_store or ReorderLogStore(), args.query, args.limit, input_fn, print_fn)
+
+    if args.command == "favorites":
+        if args.favorites_command == "add":
+            return _run_favorites_add(
+                client or MCPClient(), log_store or ReorderLogStore(), args.slug, input_fn, print_fn
+            )
+        if args.favorites_command == "remove":
+            return _run_favorites_remove(
+                client or MCPClient(), log_store or ReorderLogStore(), args.slug, input_fn, print_fn
+            )
+        if args.favorites_command is None:
+            return _run_favorites(client or MCPClient(), log_store or ReorderLogStore(), input_fn, print_fn)
+        favorites_parser.print_help()
+        return 0
+
+    if args.command == "orders":
+        return _run_orders(
+            client or MCPClient(), log_store or ReorderLogStore(), args.last, offline=args.offline,
+            input_fn=input_fn, print_fn=print_fn,
+        )
+
+    if args.command == "loyalty":
+        return _run_loyalty(client or MCPClient(), print_fn)
 
     return 0
 

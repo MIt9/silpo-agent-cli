@@ -1,6 +1,6 @@
 ---
 name: silpo-cli-usage
-description: How to use the built silpo-agent CLI to place/rebuild a Silpo grocery order and manage cart/delivery/coupons/deals -- as a user of the finished tool, not a developer of it. Use whenever asked to reorder groceries, fill/check the cart, edit a cart item, set delivery address/type/timeslot, list coupons, or show deals. For developing/extending this repo, use the silpo-agent-cli skill instead.
+description: How to use the built silpo-agent CLI to place/rebuild a Silpo grocery order and manage cart/delivery/coupons/deals/search/favorites/orders/loyalty -- as a user of the finished tool, not a developer of it. Use whenever asked to reorder groceries, fill/check/clear the cart, search products, edit a cart item, manage favorites, set delivery address/type/timeslot, list coupons/orders/loyalty, or show deals. For developing/extending this repo, use the silpo-agent-cli skill instead.
 ---
 
 # silpo-agent CLI usage
@@ -19,10 +19,12 @@ silpo-agent <command> ...
 Working from a clone of this repo instead (dev mode)? Use `uv run
 silpo-agent <command> ...` instead.
 
-All commands are **interactive** (prompt on stdin) except `deals` and
-`cart edit --replace`/`cart edit --add`. Run interactive commands in the
+All commands are **interactive** (prompt on stdin) except the read-only
+`search`/`favorites` (bare list)/`orders`/`loyalty`/`deals` and `cart edit
+--replace`/`--add`. Run interactive commands in the
 foreground / a tool call the user can actually answer prompts in -- never
-background them.
+background them. `cart clear`, `favorites add/remove` mutate the real
+cart/favorites list -- confirm before running them unprompted.
 
 First run ever needs a one-time OAuth browser login against
 `mcp.silpo.ua`; token then caches in the OS keyring. If a run hangs with no
@@ -30,7 +32,7 @@ output, it's probably waiting on that browser tab, not crashed.
 
 ## Commands
 
-`silpo-agent {reorder,smart-cart,cart,delivery,clear-context,coupons,favorites-deals,deals}`
+`silpo-agent {reorder,smart-cart,cart,cart clear,search,favorites,orders,loyalty,delivery,clear-context,coupons,favorites-deals,deals}`
 
 ### reorder -- place/rebuild the order
 
@@ -173,6 +175,24 @@ silpo-agent cart edit --remove SLUG                 # delete a line, nothing add
   `--add` first.
 - `--remove SLUG` deletes that cart line outright, nothing added back.
   Errors if `SLUG` isn't actually in the cart.
+- `cart clear [--yes]` empties the whole cart after a `[y/N]`
+  confirmation (`--yes`/`-y` skips it). An already-empty cart just reports
+  it without any mutation.
+
+### search / favorites / orders / loyalty -- read-only discovery (+ favorites management)
+
+```bash
+silpo-agent search "молоко" [--limit 10]  # free-text search, prints slugs for cart edit --add/--replace
+silpo-agent favorites                     # all liked products (favorites-deals shows only discounted ones)
+silpo-agent favorites add SLUG            # like a product
+silpo-agent favorites remove SLUG         # unlike it
+silpo-agent orders [--last 5] [--offline] # recent online orders newest-first; --offline for in-store receipts
+silpo-agent loyalty                       # bonus balance, promo selection state, codes, certificates
+```
+None of these touch the cart except `favorites add/remove` (which touch
+only the favorites list) and `cart clear` above. Slugs always come from
+real output (`search`, `cart`, `deals`, `favorites`) -- never construct
+one from a product name.
 
 ### delivery -- set address, delivery type, timeslot
 

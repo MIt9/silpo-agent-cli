@@ -305,6 +305,17 @@ def remove_cart_item(client, cart_context: CartContext, slug: str) -> CartEditRe
     )
 
 
+def clear_cart(client, cart_context: CartContext) -> int:
+    """Empties the whole cart via `silpo_clear_shopping_cart` (real request:
+    `{"shoppingCartId"}` only, docs/mcp_schema.md). Returns the removed
+    line count. Zero MCP calls when there is no resolved cart."""
+    if not cart_context.shopping_cart_id:
+        raise CartEditError("no cart resolved; nothing to clear")
+    removed = len(cart_context.products)
+    client.call("silpo_clear_shopping_cart", {"shoppingCartId": cart_context.shopping_cart_id})
+    return removed
+
+
 def _attempt_rollback_and_raise(
     client, cart_context, old_slug, old_product_id, old_company_id, old_branch_id, quantity, new_id, add_exc
 ):
