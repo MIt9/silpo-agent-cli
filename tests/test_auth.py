@@ -105,7 +105,7 @@ def test_first_run_with_no_stored_token_triggers_browser_login():
     assert token_store.load() == fresh_token
 
 
-def test_token_store_round_trips_through_keyring(monkeypatch):
+def test_token_store_round_trips_through_keyring(monkeypatch, tmp_path):
     saved = {}
 
     monkeypatch.setattr(
@@ -116,7 +116,7 @@ def test_token_store_round_trips_through_keyring(monkeypatch):
         lambda s, u, v: saved.__setitem__((s, u), v),
     )
 
-    store = TokenStore(service="test-service", username="test-user")
+    store = TokenStore(service="test-service", username="test-user", file_path=str(tmp_path / "token.json"))
     assert store.load() is None
 
     store.save({"access_token": "abc", "refresh_token": "r", "expires_at": 123.0})

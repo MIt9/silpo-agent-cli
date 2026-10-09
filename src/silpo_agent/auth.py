@@ -254,6 +254,7 @@ def pkce_browser_login() -> dict:
             }
         )
         webbrowser.open(authorize_url)
+        print(f"Opened browser for Silpo login (callback on {redirect_uri}) -- complete it there, then return here.")
         code = _wait_for_redirect(httpd, state)
     except Exception:
         httpd.server_close()

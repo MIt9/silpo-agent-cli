@@ -1,6 +1,6 @@
 [project]
 name = "silpo-agent-cli"
-version = "0.4.3"
+version = "0.4.4"
 description = "Personal CLI wrapper over the Silpo MCP server"
 readme = "README.md"
 license = "MIT"
