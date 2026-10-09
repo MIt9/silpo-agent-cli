@@ -232,6 +232,106 @@ def test_refresh_token_http_omits_absent_client_id(monkeypatch):
     auth_module.refresh_token_http("r1")
 
     assert "client_id" not in captured
+
+
+def test_bind_falls_back_to_free_port_when_default_is_taken():
+    import socket
+
+    import silpo_agent.auth as auth_module
+
+    squatter = None
+    try:
+        squatter = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        squatter.bind(("127.0.0.1", auth_module.REDIRECT_PORT))
+        squatter.listen(1)
+    except OSError:
+        pass
+
+    try:
+        httpd, redirect_uri = auth_module._bind_callback_server()
+    finally:
+        if squatter is not None:
+            squatter.close()
+
+    assert redirect_uri != auth_module.REDIRECT_URI
+    assert redirect_uri.startswith("http://localhost:")
+    assert redirect_uri.endswith("/callback")
+    port = int(redirect_uri.split(":")[2].split("/")[0])
+    assert port != auth_module.REDIRECT_PORT
+    probe = socket.create_connection(("127.0.0.1", port), timeout=5)
+    probe.close()
+    httpd.server_close()
+
+
+def test_wait_for_redirect_returns_code_and_closes_port():
+    import http.client
+    import threading
+
+    import silpo_agent.auth as auth_module
+
+    httpd, redirect_uri = auth_module._bind_callback_server()
+    port = httpd.server_address[1]
+
+    def hit_callback():
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/callback?code=abc123&state=s1")
+        conn.getresponse().read()
+        conn.close()
+
+    thread = threading.Thread(target=hit_callback)
+    thread.start()
+    code = auth_module._wait_for_redirect(httpd, "s1")
+    thread.join(timeout=10)
+
+    assert code == "abc123"
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
+        assert False, "callback port should be closed after the redirect"
+    except OSError:
+        pass
+
+
+def test_wait_for_redirect_rejects_state_mismatch():
+    import http.client
+    import threading
+
+    import pytest
+
+    import silpo_agent.auth as auth_module
+
+    httpd, _ = auth_module._bind_callback_server()
+    port = httpd.server_address[1]
+
+    def hit_callback():
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/callback?code=abc123&state=wrong")
+        conn.getresponse().read()
+        conn.close()
+
+    thread = threading.Thread(target=hit_callback)
+    thread.start()
+    try:
+        with pytest.raises(auth_module.AuthError):
+            auth_module._wait_for_redirect(httpd, "s1")
+    finally:
+        thread.join(timeout=10)
+
+
+def test_register_client_sends_bound_redirect_uri(monkeypatch):
+    import silpo_agent.auth as auth_module
+
+    captured = {}
+
+    def fake_post_json(url, payload, headers=None):
+        captured.update(payload)
+        return {"client_id": "cid-1"}
+
+    monkeypatch.setattr(auth_module, "_post_json", fake_post_json)
+
+    assert auth_module._register_client("http://localhost:54321/callback") == "cid-1"
+    assert captured["redirect_uris"] == ["http://localhost:54321/callback"]
 import json
 
 import silpo_agent.auth as auth_module

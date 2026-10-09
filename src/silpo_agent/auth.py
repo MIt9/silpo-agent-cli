@@ -111,11 +111,11 @@ def _token_from_response(resp: dict, client_id: str | None = None) -> dict:
     }
 
 
-def _register_client() -> str:
+def _register_client(redirect_uri: str = REDIRECT_URI) -> str:
     resp = _post_json(
         REGISTER_URL,
         {
-            "redirect_uris": [REDIRECT_URI],
+            "redirect_uris": [redirect_uri],
             "token_endpoint_auth_method": "none",
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -142,12 +142,35 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         pass
 
 
-def _wait_for_redirect(expected_state: str) -> str:
-    httpd = HTTPServer(("127.0.0.1", REDIRECT_PORT), _CallbackHandler)
+class _CallbackServer(HTTPServer):
+    # A previous login run's socket can linger in TIME_WAIT after an
+    # abrupt exit -- rebinding must not fail on that alone.
+    allow_reuse_address = True
+
+
+def _bind_callback_server() -> tuple[HTTPServer, str]:
+    """Bind the loopback OAuth callback listener, preferring REDIRECT_PORT
+    but falling back to an ephemeral free port when something else already
+    listens there. Live case (2026-10-09): an unrelated long-running node
+    process permanently LISTENs on :8765, so a fixed-port-only bind turns
+    every fresh login into `OSError: Address already in use`. The bound
+    URI is registered with the server before the browser opens, so the
+    fallback stays a legitimate registered redirect."""
+    try:
+        return _CallbackServer(("127.0.0.1", REDIRECT_PORT), _CallbackHandler), REDIRECT_URI
+    except OSError:
+        httpd = _CallbackServer(("127.0.0.1", 0), _CallbackHandler)
+        return httpd, f"http://localhost:{httpd.server_address[1]}/callback"
+
+
+def _wait_for_redirect(httpd: HTTPServer, expected_state: str) -> str:
     httpd.auth_code = None
     httpd.auth_error = None
     httpd.auth_state = None
-    httpd.handle_request()
+    try:
+        httpd.handle_request()
+    finally:
+        httpd.server_close()
     if httpd.auth_error or not httpd.auth_code:
         raise AuthError(f"OAuth authorize redirect returned an error: {httpd.auth_error}")
     if httpd.auth_state != expected_state:
@@ -165,31 +188,37 @@ def pkce_browser_login() -> dict:
     missing them, which may be why mcp.silpo.ua/authorize hard-blocked this
     flow with a Cloudflare 403 (see mcp_auth_cloudflare_block memory note).
     """
-    client_id = _register_client()
-    verifier = secrets.token_urlsafe(64)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    state = secrets.token_urlsafe(32)
+    client_id = None
+    httpd, redirect_uri = _bind_callback_server()
+    try:
+        client_id = _register_client(redirect_uri)
+        verifier = secrets.token_urlsafe(64)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        state = secrets.token_urlsafe(32)
 
-    authorize_url = AUTHORIZE_URL + "?" + urllib.parse.urlencode(
-        {
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": REDIRECT_URI,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "state": state,
-            "resource": SERVER_URL,
-        }
-    )
-    webbrowser.open(authorize_url)
-    code = _wait_for_redirect(state)
+        authorize_url = AUTHORIZE_URL + "?" + urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": state,
+                "resource": SERVER_URL,
+            }
+        )
+        webbrowser.open(authorize_url)
+        code = _wait_for_redirect(httpd, state)
+    except Exception:
+        httpd.server_close()
+        raise
 
     resp = _post_form(
         TOKEN_URL,
         {
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": REDIRECT_URI,
+            "redirect_uri": redirect_uri,
             "client_id": client_id,
             "code_verifier": verifier,
         },
