@@ -50,7 +50,8 @@ silpo-agent` wherever the docs say `silpo-agent` (see
 [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 The first command that needs the server opens a browser once for an
-OAuth2.1+PKCE login. After that the token lives in your OS keyring and you
+OAuth2.1+PKCE login. After that the token lives in your OS keyring (with a
+`~/.silpo-agent/token.json` fallback if the keychain refuses writes) and you
 won't be asked again until it expires.
 
 ## Commands

@@ -332,6 +332,62 @@ def test_register_client_sends_bound_redirect_uri(monkeypatch):
 
     assert auth_module._register_client("http://localhost:54321/callback") == "cid-1"
     assert captured["redirect_uris"] == ["http://localhost:54321/callback"]
+
+
+def test_token_store_falls_back_to_file_when_keyring_fails(monkeypatch, tmp_path):
+    import keyring.errors
+
+    import silpo_agent.auth as auth_module
+
+    def boom(*a, **k):
+        raise keyring.errors.PasswordSetError("locked")
+
+    monkeypatch.setattr(auth_module.keyring, "get_password", boom)
+    monkeypatch.setattr(auth_module.keyring, "set_password", boom)
+
+    store = auth_module.TokenStore(
+        service="test-service", username="test-user", file_path=str(tmp_path / "token.json")
+    )
+    token = {"access_token": "abc", "refresh_token": "r", "expires_at": 123.0, "client_id": "cid-1"}
+
+    store.save(token)
+
+    assert store.load() == token
+    assert (tmp_path / "token.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_token_store_prefers_keyring_over_stale_file(monkeypatch, tmp_path):
+    import silpo_agent.auth as auth_module
+
+    file_path = tmp_path / "token.json"
+    file_path.write_text('{"access_token": "stale"}')
+    monkeypatch.setattr(
+        auth_module.keyring, "get_password", lambda s, u: '{"access_token": "fresh"}'
+    )
+
+    store = auth_module.TokenStore(
+        service="test-service", username="test-user", file_path=str(file_path)
+    )
+
+    assert store.load() == {"access_token": "fresh"}
+
+
+def test_token_store_clear_wipes_keyring_and_file(monkeypatch, tmp_path):
+    import silpo_agent.auth as auth_module
+
+    deleted = []
+    file_path = tmp_path / "token.json"
+    file_path.write_text("{}")
+    monkeypatch.setattr(
+        auth_module.keyring, "delete_password", lambda s, u: deleted.append((s, u))
+    )
+
+    auth_module.TokenStore(
+        service="test-service", username="test-user", file_path=str(file_path)
+    ).clear()
+
+    assert deleted == [("test-service", "test-user")]
+    assert not file_path.exists()
 import json
 
 import silpo_agent.auth as auth_module

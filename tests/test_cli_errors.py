@@ -74,3 +74,12 @@ def test_broken_pipe_exits_quietly(monkeypatch):
 
     assert code == 0
     assert silenced == [True]
+
+
+def test_keyring_error_becomes_clean_exit_1_not_traceback(capsys):
+    import keyring.errors
+
+    code = main([], client=ExplodingClient(keyring.errors.PasswordSetError("locked")))
+
+    assert code == 1
+    assert "keychain" in capsys.readouterr().err

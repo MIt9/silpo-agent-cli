@@ -22,6 +22,8 @@ from importlib.metadata import version
 
 from silpo_agent.address_resolver import resolve_address
 from silpo_agent.auth import AuthError, MCPClient, MCPError, TokenStore
+
+import keyring.errors
 from silpo_agent.cart_context import (
     confirm_no_blocking_validations,
     errors_are_only_stale_timeslot,
@@ -119,6 +121,16 @@ def _report_auth_error(exc: AuthError) -> int:
 
 def _report_mcp_error(exc: MCPError) -> int:
     print(f"Error: Silpo request failed: {_format_mcp_error(exc)}", file=sys.stderr)
+    return 1
+
+
+def _report_keyring_error(exc: Exception) -> int:
+    print(f"Error: couldn't access the OS keychain: {exc}", file=sys.stderr)
+    print(
+        "Unlock the login keychain and approve the access prompt, then run again. "
+        "If it persists, run 'silpo-agent clear-context --yes' to reset local state.",
+        file=sys.stderr,
+    )
     return 1
 
 
@@ -1587,6 +1599,8 @@ def main(
         return _report_auth_error(exc)
     except MCPError as exc:
         return _report_mcp_error(exc)
+    except keyring.errors.KeyringError as exc:
+        return _report_keyring_error(exc)
     except (KeyboardInterrupt, EOFError):
         print_fn("Aborted.")
         return 1

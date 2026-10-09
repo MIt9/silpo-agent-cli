@@ -12,6 +12,7 @@ been verified against the live server.
 import base64
 import hashlib
 import json
+import os
 import secrets
 import time
 import urllib.error
@@ -47,30 +48,75 @@ class AuthError(Exception):
 
 class TokenStore:
     """Wraps the OS keyring (via the `keyring` package) as JSON-serialized
-    token storage. This is the mockable system boundary for auth persistence.
+    token storage, with a 0600 file fallback. This is the mockable system
+    boundary for auth persistence.
+
+    Live case (2026-10-09): macOS keychain writes can fail outright
+    (`PasswordSetError: -25244`) after a successful browser login -- without
+    a fallback the fresh token is lost and every run re-logins, then crashes
+    on save. Keyring stays primary; the file only carries tokens the keychain
+    refused, and `clear` wipes both.
     """
 
-    def __init__(self, service: str = KEYRING_SERVICE, username: str = KEYRING_USERNAME):
+    def __init__(
+        self,
+        service: str = KEYRING_SERVICE,
+        username: str = KEYRING_USERNAME,
+        file_path: str | None = None,
+    ):
         self.service = service
         self.username = username
+        self.file_path = file_path or os.path.join(os.path.expanduser("~"), ".silpo-agent", "token.json")
 
     def load(self) -> dict | None:
-        raw = keyring.get_password(self.service, self.username)
-        if not raw:
-            return None
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return None
+            raw = keyring.get_password(self.service, self.username)
+        except keyring.errors.KeyringError:
+            raw = None
+        if raw:
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        return self._load_file()
 
     def save(self, token: dict) -> None:
-        keyring.set_password(self.service, self.username, json.dumps(token))
+        try:
+            keyring.set_password(self.service, self.username, json.dumps(token))
+            return
+        except keyring.errors.KeyringError:
+            pass
+        self._save_file(json.dumps(token))
 
     def clear(self) -> None:
         try:
             keyring.delete_password(self.service, self.username)
         except keyring.errors.PasswordDeleteError:
             pass
+        try:
+            os.remove(self.file_path)
+        except OSError:
+            pass
+
+    def _load_file(self) -> dict | None:
+        try:
+            with open(self.file_path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+    def _save_file(self, payload: str) -> None:
+        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+        fd = os.open(self.file_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
 
 
 def _post_json(url: str, payload: dict, headers: dict | None = None) -> dict:
