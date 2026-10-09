@@ -161,3 +161,52 @@ def test_loyalty_prints_snapshot(capsys):
 
     assert main(["loyalty"], client=client) == 0
     assert "10.00" in capsys.readouterr().out
+
+
+def test_smart_cart_fill_to_ignores_cart_dupes_in_projection(capsys, tmp_path):
+    """Fill-to on a non-empty cart must project only genuinely new items:
+    pending lines already in the cart add 0.00 (write_cart drops them), so
+    counting them inflates the projection past the target and the fill never
+    engages."""
+    from silpo_agent.log_store import ReorderLogStore
+
+    cart_product = {"productId": "px", "name": "Butter", "slug": "butter-1", "quantity": 1, "price": 100.0}
+    client = FakeClient(
+        {
+            "silpo_get_my_delivery_addresses": [
+                {"id": "a1", "is_default": True, "address": "Kyiv, Some St 1", "latitude": 50.45, "longitude": 30.52}
+            ],
+            "silpo_get_my_shopping_cart": {"success": True, "shoppingCartId": "cart-1"},
+            "silpo_get_shopping_cart_by_id": {
+                "success": True,
+                "cart": {
+                    "deliveryType": "DeliveryHome",
+                    "timeslot": {"start": "2026-08-05T10:00:00", "end": "2026-08-05T12:00:00"},
+                    "shipments": [{"companyId": "c1", "branchId": "b1", "products": [cart_product]}],
+                    "calculation": {"validations": [], "totalAfterDiscounts": 100.0},
+                },
+                "loyalty": {},
+            },
+            "silpo_get_my_favorites": {
+                "success": True,
+                "products": [
+                    {"id": "px", "name": "Butter", "price": 90.0, "oldPrice": 100.0, "slug": "butter-1"},
+                    {"id": "py", "name": "Yogurt", "price": 50.0, "oldPrice": 70.0, "slug": "yogurt-1"},
+                    {"id": "pw", "name": "Water", "price": 60.0, "oldPrice": None, "slug": "water-1"},
+                ],
+            },
+        }
+    )
+    log_store = ReorderLogStore(tmp_path / "reorder_log.json")
+
+    exit_code = main(["smart-cart", "--no-reorder", "--fill-to", "220", "--yes"], client=client, log_store=log_store)
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "nothing to fill" not in out
+    add_calls = [call for call in client.calls if call[0] == "silpo_add_or_update_cart_products"]
+    assert len(add_calls) == 1
+    added_ids = [p["productId"] for p in add_calls[0][1]["products"]]
+    assert "py" in added_ids
+    assert "pw" in added_ids
+    assert "px" not in added_ids

@@ -392,6 +392,17 @@ def _run_smart_cart(
     # dropped here rather than risking a duplicate cart line.
     norm_candidates = [item for item in norm_result.items if item.product_id not in covered_ids]
 
+    # Cart-dedupe: lines already in the real cart add 0.00 when re-proposed,
+    # but the --fill-to projection and the --budget trim below both count
+    # pending items at face value -- without this, a fill run on a non-empty
+    # cart overstates the projection ("Already at 3871 of 3000" against a
+    # real 1960) and never engages. write_cart drops dupes anyway as a last
+    # line of defense; this just makes the projections honest first.
+    already_in_cart = {p.get("productId") for p in cart_context.products}
+    items = [item for item in items if item.product_id not in already_in_cart]
+    favorite_items = [item for item in favorite_items if item.product_id not in already_in_cart]
+    norm_candidates = [item for item in norm_candidates if item.product_id not in already_in_cart]
+
     norm_items: list[TypicalItem] = []
     if norm_candidates:
         print_fn("Adding from norms:")
